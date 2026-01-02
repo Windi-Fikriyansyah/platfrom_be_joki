@@ -106,11 +106,10 @@ func (h *ChatHandler) CreateOrGetConversation(c *fiber.Ctx) error {
 
 	// Check if conversation exists
 	var conv models.Conversation
-err = h.DB.
-	Where("client_id = ? AND freelancer_id = ?", clientID, freelancerID).
-	Order("updated_at DESC").
-	First(&conv).Error
-
+	err = h.DB.
+		Where("client_id = ? AND freelancer_id = ?", clientID, freelancerID).
+		Order("updated_at DESC").
+		First(&conv).Error
 
 	created := false
 	if err == gorm.ErrRecordNotFound {
@@ -145,8 +144,8 @@ err = h.DB.
 }
 
 type UserMini struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                string `json:"id"`
+	Name              string `json:"name"`
 	FreelancerProfile *struct {
 		SystemName string `json:"system_name,omitempty"`
 		PhotoURL   string `json:"photo_url,omitempty"`
@@ -163,18 +162,18 @@ type MessageMini struct {
 }
 
 type ConversationOut struct {
-	ID           string      `json:"id"`
-	BuyerID      string      `json:"buyer_id"`
-	SellerID     string      `json:"seller_id"`
-	ProductID    *uint       `json:"product_id,omitempty"`
-	UpdatedAt    time.Time   `json:"updated_at"`
-	UnreadCount  int64       `json:"unread_count"`
+	ID          string    `json:"id"`
+	BuyerID     string    `json:"buyer_id"`
+	SellerID    string    `json:"seller_id"`
+	ProductID   *uint     `json:"product_id,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	UnreadCount int64     `json:"unread_count"`
 
-	Buyer        *UserMini   `json:"buyer,omitempty"`
-	Seller       *UserMini   `json:"seller,omitempty"`
-	LastMessage  *MessageMini `json:"last_message,omitempty"`
+	Buyer             *UserMini    `json:"buyer,omitempty"`
+	Seller            *UserMini    `json:"seller,omitempty"`
+	LastMessage       *MessageMini `json:"last_message,omitempty"`
+	LatestOfferStatus *string      `json:"latest_offer_status,omitempty"`
 }
-
 
 // GetConversations returns user's conversations
 func (h *ChatHandler) GetConversations(c *fiber.Ctx) error {
@@ -260,16 +259,29 @@ func (h *ChatHandler) GetConversations(c *fiber.Ctx) error {
 			}
 		}
 
+		// latest_offer_status
+		var latestOffer models.JobOffer
+		var latestOfferStatus *string = nil
+		if err := h.DB.
+			Where("conversation_id = ?", conv.ID).
+			Order("created_at DESC").
+			Limit(1).
+			First(&latestOffer).Error; err == nil {
+			statusStr := string(latestOffer.Status)
+			latestOfferStatus = &statusStr
+		}
+
 		out = append(out, ConversationOut{
-			ID:          conv.ID.String(),
-			BuyerID:     conv.ClientID.String(),
-			SellerID:    conv.FreelancerID.String(),
-			ProductID:   conv.ProductID,
-			UpdatedAt:   conv.LastMessageAt, // Next kamu pakai updated_at untuk sorting
-			UnreadCount: unreadCount,
-			Buyer:       buyerMini,
-			Seller:      sellerMini,
-			LastMessage: lastPtr,
+			ID:                conv.ID.String(),
+			BuyerID:           conv.ClientID.String(),
+			SellerID:          conv.FreelancerID.String(),
+			ProductID:         conv.ProductID,
+			UpdatedAt:         conv.LastMessageAt, // Next kamu pakai updated_at untuk sorting
+			UnreadCount:       unreadCount,
+			Buyer:             buyerMini,
+			Seller:            sellerMini,
+			LastMessage:       lastPtr,
+			LatestOfferStatus: latestOfferStatus,
 		})
 	}
 
@@ -537,10 +549,9 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 
 	// Update conversation
 	// Update conversation
-_ = h.DB.Model(&models.Conversation{}).
-	Where("id = ?", conv.ID).
-	Update("last_message_at", msg.CreatedAt).Error
-
+	_ = h.DB.Model(&models.Conversation{}).
+		Where("id = ?", conv.ID).
+		Update("last_message_at", msg.CreatedAt).Error
 
 	// Transform message response
 	msgResp := MessageResponse{

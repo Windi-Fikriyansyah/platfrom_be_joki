@@ -35,18 +35,16 @@ func main() {
 	chatH := handlers.NewChatHandler(gdb, hub, rdb)
 
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
-    log.Fatal("Redis TIDAK dipakai / TIDAK connect:", err)
-}
-log.Println("Redis AKTIF & DIPAKAI oleh backend ✅")
+		log.Fatal("Redis TIDAK dipakai / TIDAK connect:", err)
+	}
+	log.Println("Redis AKTIF & DIPAKAI oleh backend ✅")
 
-if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.Product{}, &models.Conversation{},
-  &models.Message{},
-  &models.ConversationMemberRead{}); err != nil {
-	log.Fatal(err)
-}
-
-
-
+	if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.Product{}, &models.Conversation{},
+		&models.Message{},
+		&models.ConversationMemberRead{},
+		&models.JobOffer{}); err != nil {
+		log.Fatal(err)
+	}
 
 	app := fiber.New()
 
@@ -72,18 +70,15 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 	productH := handlers.NewProductHandler(gdb)
 	categoryH := handlers.NewCategoryHandler(gdb)
 
-
-
 	googleH := &handlers.GoogleOAuthHandler{
-	DB:             gdb,
-	JWTSecret:       cfg.JWTSecret,
-	Expires:         cfg.JWTExpiresMin,
-	GoogleClientID:  os.Getenv("GOOGLE_CLIENT_ID"),
-	GoogleSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
-	GoogleRedirect:  os.Getenv("GOOGLE_REDIRECT_URL"),
-	FrontendBaseURL: os.Getenv("FRONTEND_BASE_URL"),
-}
-
+		DB:              gdb,
+		JWTSecret:       cfg.JWTSecret,
+		Expires:         cfg.JWTExpiresMin,
+		GoogleClientID:  os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GoogleRedirect:  os.Getenv("GOOGLE_REDIRECT_URL"),
+		FrontendBaseURL: os.Getenv("FRONTEND_BASE_URL"),
+	}
 
 	api := app.Group("/api")
 
@@ -97,12 +92,11 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 	api.Get("/products", productH.ListPublic)
 	api.Get("/products/:id", productH.GetDetail)
 
-
 	// protected (JWT)
 	protected := api.Group("/",
-    middleware.JWTFromCookie(cfg.JWTSecret), // ⬅️ baca token dari cookie
-    middleware.AttachJWTLocals(),
-)
+		middleware.JWTFromCookie(cfg.JWTSecret), // ⬅️ baca token dari cookie
+		middleware.AttachJWTLocals(),
+	)
 
 	protected.Get("/freelancer/profile/me",
 		middleware.RequireRoles("freelancer"),
@@ -130,31 +124,29 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 		},
 	)
 
-
 	// contoh: siapa saya
 	protected.Get("/me", func(c *fiber.Ctx) error {
-    uid := c.Locals("userId")
+		uid := c.Locals("userId")
 
-    // Ambil user dari database
-    var user models.User
-    if err := gdb.First(&user, "id = ?", uid).Error; err != nil {
-        return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-            "success": false,
-            "message": "User tidak ditemukan",
-        })
-    }
+		// Ambil user dari database
+		var user models.User
+		if err := gdb.First(&user, "id = ?", uid).Error; err != nil {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
+				"success": false,
+				"message": "User tidak ditemukan",
+			})
+		}
 
-    return c.JSON(fiber.Map{
-        "success": true,
-        "data": fiber.Map{
-            "id":    user.ID,
-            "name":  user.Name,
-            "email": user.Email,
-            "role":  user.Role,
-        },
-    })
-})
-
+		return c.JSON(fiber.Map{
+			"success": true,
+			"data": fiber.Map{
+				"id":    user.ID,
+				"name":  user.Name,
+				"email": user.Email,
+				"role":  user.Role,
+			},
+		})
+	})
 
 	// client only
 	protected.Get("/client/orders",
@@ -171,15 +163,16 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 		middleware.RequireRoles("freelancer"), // yang boleh buat produk: freelancer
 		productH.CreateBasic,
 	)
-	
 
 	protected.Get("/freelancer/products",
-	middleware.RequireRoles("freelancer"),
-	productH.ListMine,
-)
+		middleware.RequireRoles("freelancer"),
+		productH.ListMine,
+	)
 
+	chat := protected.Group("/chat")
 
-chat := protected.Group("/chat")
+	// Job Offer Handler
+	offerH := handlers.NewJobOfferHandler(gdb, hub, rdb)
 
 	// HTTP Endpoints
 	chat.Post("/conversations", chatH.CreateOrGetConversation)
@@ -188,22 +181,26 @@ chat := protected.Group("/chat")
 	chat.Post("/conversations/:id/messages", chatH.SendMessage)
 	chat.Patch("/conversations/:id/read", chatH.MarkAsRead)
 
+	// Job Offer Endpoints
+	chat.Post("/conversations/:id/offers", offerH.CreateOffer)
+	chat.Get("/conversations/:id/offers", offerH.GetOffers)
+	protected.Get("/job-offers/:id", offerH.GetOffer)
+	protected.Put("/job-offers/:id", offerH.UpdateOffer)
+	protected.Patch("/job-offers/:id/status", offerH.UpdateStatus)
+
 	// WebSocket endpoint (tanpa JWT middleware, autentikasi via query param)
 	app.Get("/ws/chat", websocket.New(chatH.WebSocketHandler))
 
-
-protected.Get("/freelancer/products/:id", productH.GetOne)
-protected.Put(
-    "/freelancer/products/:id",
-    middleware.RequireRoles("freelancer"),
-    productH.UpdateProduct,
-)
-protected.Delete("/freelancer/products/:id",
-    middleware.RequireRoles("freelancer"),
-    productH.Delete,
-)
-
-
+	protected.Get("/freelancer/products/:id", productH.GetOne)
+	protected.Put(
+		"/freelancer/products/:id",
+		middleware.RequireRoles("freelancer"),
+		productH.UpdateProduct,
+	)
+	protected.Delete("/freelancer/products/:id",
+		middleware.RequireRoles("freelancer"),
+		productH.Delete,
+	)
 
 	protected.Post("/freelancer/products/cover",
 		middleware.RequireRoles("freelancer"),
@@ -211,9 +208,9 @@ protected.Delete("/freelancer/products/:id",
 	)
 
 	protected.Post("/freelancer/products/portfolio/image",
-    middleware.RequireRoles("freelancer"),
-    productH.UploadPortfolioImage,
-)
+		middleware.RequireRoles("freelancer"),
+		productH.UploadPortfolioImage,
+	)
 
 	// admin only
 	protected.Get("/admin/users",
@@ -222,16 +219,14 @@ protected.Delete("/freelancer/products/:id",
 	)
 
 	fOnboard := handlers.NewFreelancerOnboardingHandler(
-	gdb,
-	"./uploads",
-	os.Getenv("APP_BASE_URL"), // opsional, boleh kosong
-	cfg.JWTSecret,
-	cfg.JWTExpiresMin,
-)
-
+		gdb,
+		"./uploads",
+		os.Getenv("APP_BASE_URL"), // opsional, boleh kosong
+		cfg.JWTSecret,
+		cfg.JWTExpiresMin,
+	)
 
 	onb := protected.Group("/freelancer/onboarding", middleware.RequireRoles("client"))
-
 
 	onb.Get("/", fOnboard.Get)
 	onb.Post("/photo", fOnboard.UploadPhoto)
@@ -240,7 +235,7 @@ protected.Delete("/freelancer/products/:id",
 	onb.Patch("/identity", fOnboard.UpdateIdentity)
 	onb.Patch("/contact", fOnboard.UpdateContact)
 	onb.Post("/submit", fOnboard.Submit)
-	
+
 	port := os.Getenv("APP_PORT")
 	if port == "" {
 		port = "8080"

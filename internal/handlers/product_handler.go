@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
@@ -458,4 +460,239 @@ func (h *ProductHandler) Delete(c *fiber.Ctx) error {
         "success": true,
         "message": "Produk berhasil dihapus",
     })
+}
+
+
+func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
+	type Result struct {
+		ID        uint
+		Title     string
+		Category  string
+		BasePrice int64
+		CoverURL  string
+		UserID    uuid.UUID
+
+		SystemName     string
+		FreelancerType models.FreelancerType
+		PhotoURL       string
+	}
+
+	// ===== QUERY PARAM =====
+	qSearch := c.Query("q")
+	category := c.Query("cat")
+	minPrice := c.QueryInt("min", 0)
+	maxPrice := c.QueryInt("max", 0)
+
+	q := h.DB.
+		Table("products").
+		Select(`
+			products.id,
+			products.title,
+			products.category,
+			products.base_price,
+			products.cover_url,
+			products.user_id,
+			fp.system_name,
+			fp.freelancer_type,
+			fp.photo_url
+		`).
+		Joins(`
+			LEFT JOIN freelancer_profiles fp 
+			ON fp.user_id = products.user_id
+		`).
+		Where("products.status = ?", "published")
+
+	// ===== FILTER =====
+	
+
+	if qSearch != "" {
+		q = q.Where("LOWER(products.title) LIKE ?", "%"+strings.ToLower(qSearch)+"%")
+	}
+	if category != "" {
+		q = q.Where("products.category = ?", category)
+	}
+	if minPrice > 0 {
+		q = q.Where("products.base_price >= ?", minPrice)
+	}
+	if maxPrice > 0 {
+		q = q.Where("products.base_price <= ?", maxPrice)
+	}
+
+	var rows []Result
+	if err := q.
+		Order("products.created_at DESC").
+		Scan(&rows).Error; err != nil {
+
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal mengambil layanan",
+		})
+	}
+
+	out := make([]fiber.Map, 0, len(rows))
+	for _, r := range rows {
+
+		encID, err := utils.EncryptID(r.ID, os.Getenv("ID_ENCRYPT_KEY"))
+    if err != nil {
+        return c.Status(500).JSON(fiber.Map{
+            "success": false,
+            "message": "Gagal mengenkripsi ID produk",
+        })
+    }
+
+		name := r.SystemName
+		if name == "" {
+			name = "Mentor"
+		}
+
+		level := "Freelancer"
+		switch r.FreelancerType {
+		case models.FreelancerFullTime:
+			level = "Full Time"
+		case models.FreelancerPartTime:
+			level = "Part Time"
+		}
+
+		out = append(out, fiber.Map{
+			 "id":       encID,
+			"title":    r.Title,
+			"category": r.Category,
+			"price":    r.BasePrice,
+			"cover":    r.CoverURL,
+			"rating":   0,
+			"sold":     0,
+			"seller": fiber.Map{
+				"name":      name,
+				"title": "Freelancer",
+				"level":     level,
+				"photo_url": r.PhotoURL,
+			},
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    out,
+	})
+}
+
+func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
+	encID := c.Params("id")
+	
+	
+	
+	// Decrypt ID
+	rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
+	if err != nil {
+		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+			"success": false,
+			"message": "Invalid product ID",
+			"debug":   err.Error(),
+		})
+	}
+
+	
+
+	var product models.Product
+
+	// Coba dulu tanpa filter status untuk debug
+	if err := h.DB.First(&product, "id = ?", rawID).Error; err != nil {
+		
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"message": "Produk tidak ditemukan",
+			"debug": fiber.Map{
+				"id":    rawID,
+				"error": err.Error(),
+			},
+		})
+	}
+
+	
+
+	// Cek status
+	if product.Status != "published" {
+		
+		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+			"success": false,
+			"message": "Produk belum dipublikasikan",
+			"debug": fiber.Map{
+				"status": product.Status,
+			},
+		})
+	}
+
+	// Get freelancer profile
+	var profile models.FreelancerProfile
+	if err := h.DB.Where("user_id = ?", product.UserID).First(&profile).Error; err != nil {
+		
+	}
+
+	
+	// Parse packages JSON
+	var packages map[string]interface{}
+	if len(product.Packages) > 0 {
+		if err := json.Unmarshal(product.Packages, &packages); err != nil {
+			
+		}
+	}
+
+	// Parse portfolio JSON
+	var portfolio map[string]interface{}
+	if len(product.Portfolio) > 0 {
+		if err := json.Unmarshal(product.Portfolio, &portfolio); err != nil {
+			
+		}
+	}
+
+	// Parse cover transform JSON
+	var coverTransform map[string]interface{}
+	if len(product.CoverTransform) > 0 {
+		if err := json.Unmarshal(product.CoverTransform, &coverTransform); err != nil {
+			
+		}
+	}
+
+	// Build freelancer data
+	freelancerName := profile.SystemName
+	if freelancerName == "" {
+		freelancerName = "Freelancer"
+	}
+
+	freelancerLevel := "Freelancer"
+	switch profile.FreelancerType {
+	case models.FreelancerFullTime:
+		freelancerLevel = "Full Time"
+	case models.FreelancerPartTime:
+		freelancerLevel = "Part Time"
+	}
+
+	log.Printf("[GetOnePublic] Success! Returning product data")
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"id":                     product.ID,
+			"title":                  product.Title,
+			"category":               product.Category,
+			"base_price":             product.BasePrice,
+			"visibility_description": product.VisibilityDescription,
+			"cover_url":              product.CoverURL,
+			"cover_transform":        coverTransform,
+			"packages":               packages,
+			"portfolio":              portfolio,
+			"status":                 product.Status,
+			"rating":                 5.0,
+			"sold":                   0,
+			"freelancer": fiber.Map{
+				"id":        product.UserID,
+				"name":      freelancerName,
+				"title":     "Freelancer",
+				"photo_url": profile.PhotoURL,
+				"level":     freelancerLevel,
+			},
+			"created_at": product.CreatedAt,
+			"updated_at": product.UpdatedAt,
+		},
+	})
 }

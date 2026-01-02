@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
+	"github.com/gofiber/websocket/v2"
 	"github.com/joho/godotenv"
 
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/config"
@@ -13,6 +15,7 @@ import (
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/handlers"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/middleware"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
+	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/realtime"
 )
 
 func main() {
@@ -24,15 +27,31 @@ func main() {
 		log.Fatal(err)
 	}
 
-if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.Product{}); err != nil {
+	rdb := realtime.NewRedis()
+
+	hub := realtime.NewHub()
+	go hub.Run()
+
+	chatH := handlers.NewChatHandler(gdb, hub, rdb)
+
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+    log.Fatal("Redis TIDAK dipakai / TIDAK connect:", err)
+}
+log.Println("Redis AKTIF & DIPAKAI oleh backend ✅")
+
+if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.Product{}, &models.Conversation{},
+  &models.Message{},
+  &models.ConversationMemberRead{}); err != nil {
 	log.Fatal(err)
 }
+
+
 
 
 	app := fiber.New()
 
 	app.Use(cors.New(cors.Config{
-		AllowOrigins:     "http://localhost:3000",
+		AllowOrigins:     "http://127.0.0.1:3000, http://localhost:3000",
 		AllowMethods:     "GET,POST,PUT,PATCH,DELETE,OPTIONS",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization",
 		ExposeHeaders:    "Content-Length",
@@ -51,6 +70,8 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 		Expires:   cfg.JWTExpiresMin,
 	}
 	productH := handlers.NewProductHandler(gdb)
+	categoryH := handlers.NewCategoryHandler(gdb)
+
 
 
 	googleH := &handlers.GoogleOAuthHandler{
@@ -71,7 +92,10 @@ if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.P
 	api.Post("/auth/login", authH.Login)
 	api.Post("/auth/logout", authH.Logout)
 	api.Get("/auth/google/start", googleH.GoogleStart)
-api.Get("/auth/google/callback", googleH.GoogleCallback)
+	api.Get("/auth/google/callback", googleH.GoogleCallback)
+	api.Get("/categories", categoryH.GetCategories)
+	api.Get("/products", productH.ListPublic)
+	api.Get("/products/:id", productH.GetDetail)
 
 
 	// protected (JWT)
@@ -147,11 +171,26 @@ api.Get("/auth/google/callback", googleH.GoogleCallback)
 		middleware.RequireRoles("freelancer"), // yang boleh buat produk: freelancer
 		productH.CreateBasic,
 	)
+	
 
 	protected.Get("/freelancer/products",
 	middleware.RequireRoles("freelancer"),
 	productH.ListMine,
 )
+
+
+chat := protected.Group("/chat")
+
+	// HTTP Endpoints
+	chat.Post("/conversations", chatH.CreateOrGetConversation)
+	chat.Get("/conversations", chatH.GetConversations)
+	chat.Get("/conversations/:id/messages", chatH.GetMessages)
+	chat.Post("/conversations/:id/messages", chatH.SendMessage)
+	chat.Patch("/conversations/:id/read", chatH.MarkAsRead)
+
+	// WebSocket endpoint (tanpa JWT middleware, autentikasi via query param)
+	app.Get("/ws/chat", websocket.New(chatH.WebSocketHandler))
+
 
 protected.Get("/freelancer/products/:id", productH.GetOne)
 protected.Put(

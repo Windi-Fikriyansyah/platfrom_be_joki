@@ -290,6 +290,28 @@ func (h *ChatHandler) GetConversations(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"success": true, "data": out})
 }
 
+// GetUnreadTotal returns the total count of unread messages across all conversations
+func (h *ChatHandler) GetUnreadTotal(c *fiber.Ctx) error {
+	userUUID, err := getUserUUID(c)
+	if err != nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	var count int64
+	// Count messages where recipient is current user, and is_read is false
+	// We check against all conversations where user is a member
+	err = h.DB.Model(&models.Message{}).
+		Joins("JOIN conversations ON messages.conversation_id = conversations.id").
+		Where("(conversations.client_id = ? OR conversations.freelancer_id = ?) AND messages.sender_id != ? AND messages.is_read = false", userUUID, userUUID, userUUID).
+		Count(&count).Error
+
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to count unread messages"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": count})
+}
+
 // MessageResponse DTO untuk response message
 type MessageResponse struct {
 	ID             string    `json:"id"`

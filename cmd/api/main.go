@@ -8,6 +8,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/websocket/v2"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/config"
@@ -154,13 +155,21 @@ func main() {
 			})
 		}
 
+		userUUID, _ := uuid.Parse(uid.(string))
+		var unreadCount int64
+		gdb.Model(&models.Message{}).
+			Joins("JOIN conversations ON messages.conversation_id = conversations.id").
+			Where("(conversations.client_id = ? OR conversations.freelancer_id = ?) AND messages.sender_id != ? AND messages.is_read = false", userUUID, userUUID, userUUID).
+			Count(&unreadCount)
+
 		return c.JSON(fiber.Map{
 			"success": true,
 			"data": fiber.Map{
-				"id":    user.ID,
-				"name":  user.Name,
-				"email": user.Email,
-				"role":  user.Role,
+				"id":           user.ID,
+				"name":         user.Name,
+				"email":        user.Email,
+				"role":         user.Role,
+				"unread_count": unreadCount,
 			},
 		})
 	})
@@ -196,6 +205,7 @@ func main() {
 	chat.Get("/conversations/:id/messages", chatH.GetMessages)
 	chat.Post("/conversations/:id/messages", chatH.SendMessage)
 	chat.Patch("/conversations/:id/read", chatH.MarkAsRead)
+	chat.Get("/unread-count", chatH.GetUnreadTotal)
 
 	// Job Offers
 	chat.Post("/conversations/:id/offers", offerH.CreateOffer)

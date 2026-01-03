@@ -16,6 +16,7 @@ import (
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/middleware"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/realtime"
+	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/tripay"
 )
 
 func main() {
@@ -42,7 +43,9 @@ func main() {
 	if err := gdb.AutoMigrate(&models.User{}, &models.FreelancerProfile{}, &models.Product{}, &models.Conversation{},
 		&models.Message{},
 		&models.ConversationMemberRead{},
-		&models.JobOffer{}); err != nil {
+		&models.JobOffer{},
+		&models.Transaction{},
+		&models.WalletTransaction{}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -61,14 +64,28 @@ func main() {
 		return c.SendStatus(fiber.StatusNoContent)
 	})
 
+	// Serve static files
 	app.Static("/uploads", "./uploads")
+
+	// Services
+	tripayService := tripay.NewTripayService()
+
+	// Handlers
 	authH := &handlers.AuthHandler{
 		DB:        gdb,
 		JWTSecret: cfg.JWTSecret,
 		Expires:   cfg.JWTExpiresMin,
 	}
+	// chatH already initialized at line 36
+	// freelancerH not available/used, skipping
 	productH := handlers.NewProductHandler(gdb)
 	categoryH := handlers.NewCategoryHandler(gdb)
+	offerH := handlers.NewJobOfferHandler(gdb, hub, rdb)
+	offerH.StartAutoCompletionWorker()
+	paymentH := handlers.NewPaymentHandler(gdb, tripayService, hub)
+
+	// Public Callbacks (Root level to avoid middleware issues)
+	app.Post("/tripay/callback", paymentH.HandleCallback)
 
 	googleH := &handlers.GoogleOAuthHandler{
 		DB:              gdb,
@@ -171,8 +188,7 @@ func main() {
 
 	chat := protected.Group("/chat")
 
-	// Job Offer Handler
-	offerH := handlers.NewJobOfferHandler(gdb, hub, rdb)
+	// Job Offer Handler (using offerH from above)
 
 	// HTTP Endpoints
 	chat.Post("/conversations", chatH.CreateOrGetConversation)
@@ -181,14 +197,22 @@ func main() {
 	chat.Post("/conversations/:id/messages", chatH.SendMessage)
 	chat.Patch("/conversations/:id/read", chatH.MarkAsRead)
 
-	// Job Offer Endpoints
+	// Job Offers
 	chat.Post("/conversations/:id/offers", offerH.CreateOffer)
 	chat.Get("/conversations/:id/offers", offerH.GetOffers)
 	protected.Get("/job-offers/:id", offerH.GetOffer)
-	protected.Put("/job-offers/:id", offerH.UpdateOffer)
 	protected.Patch("/job-offers/:id/status", offerH.UpdateStatus)
+	protected.Put("/job-offers/:id", offerH.UpdateOffer)          // Update offer
+	protected.Post("/job-offers/:id/deliver", offerH.DeliverWork) // Deliver work
+	protected.Post("/job-offers/:id/revision", offerH.RequestRevision)
+	protected.Post("/job-offers/:id/complete", offerH.CompleteOrder)
 
-	// WebSocket endpoint (tanpa JWT middleware, autentikasi via query param)
+	// Payments
+	protected.Get("/payments/channels", paymentH.GetChannels)
+	protected.Post("/payments/create", paymentH.CreatePayment)
+
+	// Public Callbacks
+	api.Post("/payments/callback", paymentH.HandleCallback) // WebSocket endpoint (tanpa JWT middleware, autentikasi via query param)
 	app.Get("/ws/chat", websocket.New(chatH.WebSocketHandler))
 
 	protected.Get("/freelancer/products/:id", productH.GetOne)

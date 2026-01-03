@@ -156,6 +156,7 @@ type MessageMini struct {
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	SenderID       string    `json:"sender_id"`
+	Type           string    `json:"type"`
 	Text           string    `json:"text"`
 	IsRead         bool      `json:"is_read"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -218,6 +219,7 @@ func (h *ChatHandler) GetConversations(c *fiber.Ctx) error {
 				ID:             last.ID.String(),
 				ConversationID: last.ConversationID.String(),
 				SenderID:       last.SenderID.String(),
+				Type:           last.Type,
 				Text:           last.Text,
 				IsRead:         last.IsRead,
 				CreatedAt:      last.CreatedAt,
@@ -293,6 +295,7 @@ type MessageResponse struct {
 	ID             string    `json:"id"`
 	ConversationID string    `json:"conversation_id"`
 	SenderID       string    `json:"sender_id"`
+	Type           string    `json:"type"`
 	Text           string    `json:"text"`
 	IsRead         bool      `json:"is_read"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -383,6 +386,7 @@ func (h *ChatHandler) GetMessages(c *fiber.Ctx) error {
 			ID:             msg.ID.String(),
 			ConversationID: msg.ConversationID.String(),
 			SenderID:       msg.SenderID.String(),
+			Type:           msg.Type,
 			Text:           msg.Text,
 			IsRead:         msg.IsRead,
 			CreatedAt:      msg.CreatedAt,
@@ -558,6 +562,7 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 		ID:             msg.ID.String(),
 		ConversationID: msg.ConversationID.String(),
 		SenderID:       msg.SenderID.String(),
+		Type:           msg.Type,
 		Text:           msg.Text,
 		IsRead:         msg.IsRead,
 		CreatedAt:      msg.CreatedAt,

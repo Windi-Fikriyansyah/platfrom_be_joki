@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"encoding/json"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
@@ -57,6 +61,10 @@ type JobOfferResponse struct {
 	DeliveryFormat string `json:"delivery_format"`
 	Notes          string `json:"notes"`
 
+	WorkDeliveryLink  string `json:"work_delivery_link"`
+	WorkDeliveryFiles string `json:"work_delivery_files"`
+	UsedRevisionCount int    `json:"used_revision_count"`
+
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
 
@@ -74,24 +82,27 @@ type ProductMini struct {
 
 func toJobOfferResponse(offer *models.JobOffer) JobOfferResponse {
 	resp := JobOfferResponse{
-		ID:             offer.ID.String(),
-		OrderCode:      offer.OrderCode,
-		ConversationID: offer.ConversationID.String(),
-		FreelancerID:   offer.FreelancerID.String(),
-		ClientID:       offer.ClientID.String(),
-		ProductID:      offer.ProductID,
-		Price:          offer.Price,
-		PlatformFee:    offer.PlatformFee,
-		NetAmount:      offer.NetAmount,
-		Title:          offer.Title,
-		Description:    offer.Description,
-		RevisionCount:  offer.RevisionCount,
-		StartDate:      offer.StartDate.Format("2006-01-02"),
-		DeliveryDate:   offer.DeliveryDate.Format("2006-01-02"),
-		DeliveryFormat: offer.DeliveryFormat,
-		Notes:          offer.Notes,
-		Status:         string(offer.Status),
-		CreatedAt:      offer.CreatedAt,
+		ID:                offer.ID.String(),
+		OrderCode:         offer.OrderCode,
+		ConversationID:    offer.ConversationID.String(),
+		FreelancerID:      offer.FreelancerID.String(),
+		ClientID:          offer.ClientID.String(),
+		ProductID:         offer.ProductID,
+		Price:             offer.Price,
+		PlatformFee:       offer.PlatformFee,
+		NetAmount:         offer.NetAmount,
+		Title:             offer.Title,
+		Description:       offer.Description,
+		RevisionCount:     offer.RevisionCount,
+		StartDate:         offer.StartDate.Format("2006-01-02"),
+		DeliveryDate:      offer.DeliveryDate.Format("2006-01-02"),
+		DeliveryFormat:    offer.DeliveryFormat,
+		Notes:             offer.Notes,
+		WorkDeliveryLink:  offer.WorkDeliveryLink,
+		WorkDeliveryFiles: offer.WorkDeliveryFiles,
+		UsedRevisionCount: offer.UsedRevisionCount,
+		Status:            string(offer.Status),
+		CreatedAt:         offer.CreatedAt,
 	}
 
 	if offer.Product != nil {
@@ -685,4 +696,375 @@ func (h *JobOfferHandler) UpdateOffer(c *fiber.Ctx) error {
 		"success": true,
 		"data":    toJobOfferResponse(&offer),
 	})
+}
+
+// DeliverWork handles work submission by freelancer
+func (h *JobOfferHandler) DeliverWork(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	userUUID, _ := uuid.Parse(userID.(string))
+	offerID := c.Params("id")
+	offerUUID, err := uuid.Parse(offerID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
+	}
+
+	var offer models.JobOffer
+	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
+	}
+
+	if offer.FreelancerID != userUUID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the assigned freelancer can deliver work"})
+	}
+
+	// Only allow delivery if paid or working
+	if offer.Status != models.OfferStatusPaid && offer.Status != models.OfferStatusWorking {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Order must be in 'Paid' or 'Working' status to deliver"})
+	}
+
+	workURL := c.FormValue("work_url")
+
+	// Handle Multiple File Uploads
+	form, err := c.MultipartForm()
+	var filePaths []string
+	if err != nil {
+		log.Println("Error parsing multipart form:", err)
+	} else {
+		files := form.File["files"]
+		for _, file := range files {
+			// Limit 25MB check (Fiber usually has a global limit, but we can check individually)
+			if file.Size > 25*1024*1024 {
+				return c.Status(400).JSON(fiber.Map{"success": false, "message": "File " + file.Filename + " exceeds 25MB limit"})
+			}
+
+			// Save file
+			ext := filepath.Ext(file.Filename)
+			filename := uuid.New().String() + ext
+			uploadDir := "./uploads/deliveries"
+			os.MkdirAll(uploadDir, 0755)
+
+			savePath := filepath.Join(uploadDir, filename)
+			if err := c.SaveFile(file, savePath); err != nil {
+				log.Println("Error saving delivery file:", err)
+				continue
+			}
+
+			publicPath := "/uploads/deliveries/" + filename
+			base := os.Getenv("APP_BASE_URL")
+			if base != "" {
+				publicPath = strings.TrimRight(base, "/") + publicPath
+			}
+			filePaths = append(filePaths, publicPath)
+		}
+	}
+
+	filesJSON, _ := json.Marshal(filePaths)
+
+	// Update Offer
+	offer.Status = models.OfferStatusDelivered
+	offer.WorkDeliveryLink = workURL
+	offer.WorkDeliveryFiles = string(filesJSON)
+	offer.UpdatedAt = time.Now()
+
+	if err := h.DB.Save(&offer).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update offer status"})
+	}
+
+	// Create Delivery System Message
+	msg := models.Message{
+		ID:             uuid.New(),
+		ConversationID: offer.ConversationID,
+		SenderID:       userUUID,
+		Text:           "Freelancer mengirimkan pekerjaan untuk ditinjau dan disetujui.\n\nPembeli dapat meminta revisi dalam kurun waktu 7 hari. Jika tidak ada respon dalam jangka waktu yang ditentukan, sistem akan secara otomatis menyetujui pekerjaan untuk freelancer.",
+		Type:           "delivery", // Special type for custom rendering
+		IsRead:         false,
+	}
+	h.DB.Create(&msg)
+
+	// Broadcast Updates
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type": "new_message",
+		"message": fiber.Map{
+			"id":              msg.ID.String(),
+			"conversation_id": msg.ConversationID.String(),
+			"sender_id":       msg.SenderID.String(),
+			"text":            msg.Text,
+			"type":            msg.Type,
+			"created_at":      msg.CreatedAt,
+		},
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type":  "offer_status_update",
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    toJobOfferResponse(&offer),
+	})
+}
+
+// RequestRevision handles revision request by client
+func (h *JobOfferHandler) RequestRevision(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	userUUID, _ := uuid.Parse(userID.(string))
+	offerID := c.Params("id")
+	offerUUID, err := uuid.Parse(offerID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.Reason == "" {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Revision reason is required"})
+	}
+
+	var offer models.JobOffer
+	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
+	}
+
+	if offer.ClientID != userUUID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the client can request revisions"})
+	}
+
+	if offer.Status != models.OfferStatusDelivered {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Revision can only be requested for delivered work"})
+	}
+
+	if offer.UsedRevisionCount >= offer.RevisionCount {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Revision limit reached. No more revisions available for this offer."})
+	}
+
+	// Update Offer
+	offer.Status = models.OfferStatusWorking
+	offer.UsedRevisionCount++
+	offer.UpdatedAt = time.Now()
+
+	if err := h.DB.Save(&offer).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to update offer status"})
+	}
+
+	// Create Revision Message
+	msg := models.Message{
+		ID:             uuid.New(),
+		ConversationID: offer.ConversationID,
+		SenderID:       userUUID,
+		Text:           req.Reason,
+		Type:           "revision", // Special type for revision info
+		IsRead:         false,
+	}
+	h.DB.Create(&msg)
+
+	// Broadcast Updates
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type": "new_message",
+		"message": fiber.Map{
+			"id":              msg.ID.String(),
+			"conversation_id": msg.ConversationID.String(),
+			"sender_id":       msg.SenderID.String(),
+			"text":            msg.Text,
+			"type":            msg.Type,
+			"created_at":      msg.CreatedAt,
+		},
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type":  "offer_status_update",
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&offer)})
+}
+
+// CompleteOrder handles order completion by client
+func (h *JobOfferHandler) CompleteOrder(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	userUUID, _ := uuid.Parse(userID.(string))
+	offerID := c.Params("id")
+	offerUUID, err := uuid.Parse(offerID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
+	}
+
+	var offer models.JobOffer
+	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
+	}
+
+	if offer.ClientID != userUUID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the client can complete the order"})
+	}
+
+	if offer.Status != models.OfferStatusDelivered {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Only delivered orders can be completed"})
+	}
+
+	// Update Offer
+	offer.Status = models.OfferStatusCompleted
+	offer.UpdatedAt = time.Now()
+
+	// ESCROW RELEASE LOGIC
+	// 1. Get Freelancer Profile
+	var profile models.FreelancerProfile
+	if err := h.DB.Where("user_id = ?", offer.FreelancerID).First(&profile).Error; err != nil {
+		log.Printf("Freelancer profile not found for balance release: %v", err)
+	} else {
+		// 2. Add to Balance (Net Amount)
+		profile.Balance += offer.NetAmount
+		if err := h.DB.Save(&profile).Error; err != nil {
+			log.Printf("Failed to update freelancer balance: %v", err)
+		} else {
+			// 3. Create Wallet Transaction Record
+			walletTrx := models.WalletTransaction{
+				ID:                  uuid.New(),
+				FreelancerProfileID: profile.ID,
+				Amount:              offer.NetAmount,
+				Type:                models.WalletTrxCredit,
+				Description:         "Pembayaran pesanan #" + offer.OrderCode,
+				ReferenceID:         &offer.ID,
+				CreatedAt:           time.Now(),
+			}
+			h.DB.Create(&walletTrx)
+		}
+	}
+
+	if err := h.DB.Save(&offer).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to complete order"})
+	}
+
+	// Create System Message
+	msg := models.Message{
+		ID:             uuid.New(),
+		ConversationID: offer.ConversationID,
+		SenderID:       userUUID,
+		Text:           "Pesanan telah diselesaikan oleh pembeli. Terima kasih telah menggunakan Jokiin!",
+		Type:           "system",
+		IsRead:         false,
+	}
+	h.DB.Create(&msg)
+
+	// Broadcast Updates
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type": "new_message",
+		"message": fiber.Map{
+			"id":              msg.ID.String(),
+			"conversation_id": msg.ConversationID.String(),
+			"sender_id":       msg.SenderID.String(),
+			"text":            msg.Text,
+			"type":            msg.Type,
+			"created_at":      msg.CreatedAt,
+		},
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		"type":  "offer_status_update",
+		"offer": toJobOfferResponse(&offer),
+	})
+
+	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&offer)})
+}
+
+// StartAutoCompletionWorker runs a background job to complete orders after 3 days of delivery
+func (h *JobOfferHandler) StartAutoCompletionWorker() {
+	ticker := time.NewTicker(1 * time.Hour)
+	go func() {
+		for range ticker.C {
+			log.Println("[AutoCompletionWorker] Scanning for delivered orders to auto-complete...")
+			h.scanAndCompleteOrders()
+		}
+	}()
+}
+
+func (h *JobOfferHandler) scanAndCompleteOrders() {
+	var deliveredOffers []models.JobOffer
+	threeDaysAgo := time.Now().Add(-72 * time.Hour)
+
+	// Cari offer status 'delivered' yang updatedAt (saat dikirim) <= 3 hari yang lalu
+	err := h.DB.Where("status = ? AND updated_at <= ?", models.OfferStatusDelivered, threeDaysAgo).Find(&deliveredOffers).Error
+	if err != nil {
+		log.Printf("[AutoCompletionWorker] Error fetching delivered offers: %v", err)
+		return
+	}
+
+	for _, offer := range deliveredOffers {
+		log.Printf("[AutoCompletionWorker] Auto-completing Offer %s (Order: %s)", offer.ID, offer.OrderCode)
+
+		h.DB.Transaction(func(tx *gorm.DB) error {
+			// 1. Update status
+			offer.Status = models.OfferStatusCompleted
+			offer.UpdatedAt = time.Now()
+			if err := tx.Save(&offer).Error; err != nil {
+				return err
+			}
+
+			// 2. Release Balance
+			var profile models.FreelancerProfile
+			if err := tx.Where("user_id = ?", offer.FreelancerID).First(&profile).Error; err == nil {
+				profile.Balance += offer.NetAmount
+				tx.Save(&profile)
+
+				walletTrx := models.WalletTransaction{
+					ID:                  uuid.New(),
+					FreelancerProfileID: profile.ID,
+					Amount:              offer.NetAmount,
+					Type:                models.WalletTrxCredit,
+					Description:         "Penyelesaian otomatis pesanan #" + offer.OrderCode + " (3 hari setelah pengiriman)",
+					ReferenceID:         &offer.ID,
+					CreatedAt:           time.Now(),
+				}
+				tx.Create(&walletTrx)
+			}
+
+			// 3. Create System Message
+			msg := models.Message{
+				ID:             uuid.New(),
+				ConversationID: offer.ConversationID,
+				SenderID:       offer.FreelancerID, // Use freelancer as sender for auto-msg
+				Type:           "system",
+				Text:           "Pesanan telah diselesaikan secara otomatis oleh sistem (3 hari setelah pengiriman tanpa respon).",
+				CreatedAt:      time.Now(),
+			}
+			tx.Create(&msg)
+
+			// 4. Broadcast via WebSocket
+			h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+				"type": "new_message",
+				"message": fiber.Map{
+					"id":              msg.ID.String(),
+					"conversation_id": msg.ConversationID.String(),
+					"sender_id":       msg.SenderID.String(),
+					"text":            msg.Text,
+					"type":            msg.Type,
+					"created_at":      msg.CreatedAt,
+				},
+				"offer": toJobOfferResponse(&offer),
+			})
+
+			h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+				"type":  "offer_status_update",
+				"offer": toJobOfferResponse(&offer),
+			})
+
+			return nil
+		})
+	}
 }

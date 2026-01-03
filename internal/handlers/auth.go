@@ -16,7 +16,6 @@ type AuthHandler struct {
 	Expires   int
 }
 
-
 type RegisterReq struct {
 	Name     string `json:"name"`
 	Email    string `json:"email"`
@@ -24,7 +23,6 @@ type RegisterReq struct {
 	Phone    string `json:"phone"`
 	Role     string `json:"role"` // client / freelancer (admin jangan dari publik)
 }
-
 
 type FieldErrors map[string][]string
 
@@ -51,14 +49,13 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 
 	name := strings.TrimSpace(req.Name)
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-	phone := strings.TrimSpace(req.Phone) 
+	phone := strings.TrimSpace(req.Phone)
 	password := strings.TrimSpace(req.Password)
 
 	role := string(models.RoleClient)
 
 	// --- Validasi basic
 	errors := FieldErrors{}
-
 
 	if name == "" {
 		errors.Add("name", "Nama wajib diisi")
@@ -82,15 +79,13 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 		return validationFail(c, errors)
 	}
 
-
-
 	// --- Cek email sudah ada
 	var existing models.User
 	if err := h.DB.Where("email = ?", email).First(&existing).Error; err == nil {
 		errs := FieldErrors{}
 		errs.Add("email", "Email sudah terdaftar")
 		return validationFail(c, errs)
-	} else if err != nil && err != gorm.ErrRecordNotFound {
+	} else if err != gorm.ErrRecordNotFound {
 		// error DB selain "record not found"
 		return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 			"success": false,
@@ -104,7 +99,7 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 			errs := FieldErrors{}
 			errs.Add("phone", "No. HP sudah terdaftar")
 			return validationFail(c, errs)
-		} else if err != nil && err != gorm.ErrRecordNotFound {
+		} else if err != gorm.ErrRecordNotFound {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
 				"success": false,
 				"message": "Terjadi kesalahan server",
@@ -147,30 +142,29 @@ func (h *AuthHandler) Register(c *fiber.Ctx) error {
 	}
 
 	c.Cookie(&fiber.Cookie{
-    Name:     "jm_token",
-    Value:    token,
-    Path:     "/",
-    HTTPOnly: true,
-    Secure:   false,
-    SameSite: "Lax",
-    MaxAge:   h.Expires * 60,
-})
+		Name:     "jm_token",
+		Value:    token,
+		Path:     "/",
+		HTTPOnly: true,
+		Secure:   false,
+		SameSite: "Lax",
+		MaxAge:   h.Expires * 60,
+	})
 
-return c.Status(fiber.StatusCreated).JSON(fiber.Map{
-    "success": true,
-    "message": "Register berhasil",
-    "data": fiber.Map{
-        "user": fiber.Map{
-            "id":    u.ID,
-            "name":  u.Name,
-            "email": u.Email,
-            "phone": u.Phone,
-            "role":  u.Role,
-        },
-    },
-})
+	return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+		"success": true,
+		"message": "Register berhasil",
+		"data": fiber.Map{
+			"user": fiber.Map{
+				"id":    u.ID,
+				"name":  u.Name,
+				"email": u.Email,
+				"phone": u.Phone,
+				"role":  u.Role,
+			},
+		},
+	})
 }
-
 
 type LoginReq struct {
 	Email    string `json:"email"`
@@ -178,100 +172,99 @@ type LoginReq struct {
 }
 
 func (h *AuthHandler) Login(c *fiber.Ctx) error {
-    var req LoginReq
-    if err := c.BodyParser(&req); err != nil {
-        return c.Status(fiber.StatusOK).JSON(fiber.Map{
-            "success": false,
-            "message": "Invalid body",
-        })
-    }
+	var req LoginReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"success": false,
+			"message": "Invalid body",
+		})
+	}
 
-    email := strings.ToLower(strings.TrimSpace(req.Email))
-    password := strings.TrimSpace(req.Password)
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+	password := strings.TrimSpace(req.Password)
 
-    errors := FieldErrors{}
-    if email == "" {
-        errors.Add("email", "Email wajib diisi")
-    }
-    if password == "" {
-        errors.Add("password", "Password wajib diisi")
-    }
+	errors := FieldErrors{}
+	if email == "" {
+		errors.Add("email", "Email wajib diisi")
+	}
+	if password == "" {
+		errors.Add("password", "Password wajib diisi")
+	}
 
-    if len(errors) > 0 {
-        return validationFail(c, errors)
-    }
+	if len(errors) > 0 {
+		return validationFail(c, errors)
+	}
 
-    var u models.User
-    err := h.DB.Where("email = ?", email).First(&u).Error
+	var u models.User
+	err := h.DB.Where("email = ?", email).First(&u).Error
 
-    if err != nil {
-        // Email tidak ditemukan -> tetap 200 agar FE tidak error
-        return c.Status(fiber.StatusOK).JSON(fiber.Map{
-            "success": false,
-            "message": "Email atau password salah",
-        })
-    }
+	if err != nil {
+		// Email tidak ditemukan -> tetap 200 agar FE tidak error
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"success": false,
+			"message": "Email atau password salah",
+		})
+	}
 
-    if !u.IsActive {
-        return c.Status(fiber.StatusOK).JSON(fiber.Map{
-            "success": false,
-            "message": "Akun tidak aktif",
-        })
-    }
+	if !u.IsActive {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"success": false,
+			"message": "Akun tidak aktif",
+		})
+	}
 
-    if !utils.CheckPassword(u.Password, password) {
-        return c.Status(fiber.StatusOK).JSON(fiber.Map{
-            "success": false,
-            "message": "Email atau password salah",
-        })
-    }
+	if !utils.CheckPassword(u.Password, password) {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"success": false,
+			"message": "Email atau password salah",
+		})
+	}
 
-    token, err := utils.SignJWT(h.JWTSecret, u.ID.String(), string(u.Role), h.Expires)
-    if err != nil {
-        return c.Status(fiber.StatusOK).JSON(fiber.Map{
-            "success": false,
-            "message": "Gagal membuat token",
-        })
-    }
+	token, err := utils.SignJWT(h.JWTSecret, u.ID.String(), string(u.Role), h.Expires)
+	if err != nil {
+		return c.Status(fiber.StatusOK).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal membuat token",
+		})
+	}
 
-    c.Cookie(&fiber.Cookie{
-        Name:     "jm_token",
-        Value:    token,
-        Path:     "/",
-        HTTPOnly: true,
-        Secure:   false,
-        SameSite: "Lax",
-        MaxAge:   h.Expires * 60,
-    })
+	c.Cookie(&fiber.Cookie{
+		Name:     "jm_token",
+		Value:    token,
+		Path:     "/",
+		HTTPOnly: true,
+		Secure:   false,
+		SameSite: "Lax",
+		MaxAge:   h.Expires * 60,
+	})
 
-    return c.Status(fiber.StatusOK).JSON(fiber.Map{
-        "success": true,
-        "message": "Login berhasil",
-        "data": fiber.Map{
-            "user": fiber.Map{
-                "id":    u.ID,
-                "name":  u.Name,
-                "email": u.Email,
-                "role":  u.Role,
-            },
-        },
-    })
+	return c.Status(fiber.StatusOK).JSON(fiber.Map{
+		"success": true,
+		"message": "Login berhasil",
+		"data": fiber.Map{
+			"user": fiber.Map{
+				"id":    u.ID,
+				"name":  u.Name,
+				"email": u.Email,
+				"role":  u.Role,
+			},
+		},
+	})
 }
 
-
 func (h *AuthHandler) Logout(c *fiber.Ctx) error {
-    c.Cookie(&fiber.Cookie{
-        Name:     "jm_token",
-        Value:    "",
-        Path:     "/",
-        MaxAge:   -1,     // hapus cookie
-        HTTPOnly: true,
-        Secure:   false,   // gunakan false jika development HTTP
-        SameSite: "Lax",
-    })
+	c.Cookie(&fiber.Cookie{
+		Name:     "jm_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1, // hapus cookie
+		HTTPOnly: true,
+		Secure:   false, // gunakan false jika development HTTP
+		SameSite: "Lax",
+	})
 
-    return c.JSON(fiber.Map{
-        "success": true,
-        "message": "Logout berhasil",
-    })
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Logout berhasil",
+	})
 }

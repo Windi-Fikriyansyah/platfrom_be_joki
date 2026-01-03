@@ -8,25 +8,27 @@ import (
 )
 
 type FreelancerType string
+
 const (
 	FreelancerFullTime FreelancerType = "full_time"
 	FreelancerPartTime FreelancerType = "part_time"
 )
 
 type OnboardingStatus string
+
 const (
-	StatusDraft        OnboardingStatus = "draft"
+	StatusDraft         OnboardingStatus = "draft"
 	StatusPendingReview OnboardingStatus = "pending_review"
-	StatusApproved     OnboardingStatus = "approved"
-	StatusRejected     OnboardingStatus = "rejected"
+	StatusApproved      OnboardingStatus = "approved"
+	StatusRejected      OnboardingStatus = "rejected"
 )
 
 type FreelancerProfile struct {
-	ID        uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
-	UserID    uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"user_id"`
+	ID     uuid.UUID `gorm:"type:uuid;default:gen_random_uuid();primaryKey" json:"id"`
+	UserID uuid.UUID `gorm:"type:uuid;uniqueIndex;not null" json:"user_id"`
 
 	// Step tracking
-	OnboardingStep   int             `gorm:"not null;default:1" json:"onboarding_step"` // 1..5
+	OnboardingStep   int              `gorm:"not null;default:1" json:"onboarding_step"` // 1..5
 	OnboardingStatus OnboardingStatus `gorm:"type:varchar(30);not null;default:'draft'" json:"onboarding_status"`
 
 	// Step 1 - photo
@@ -43,8 +45,7 @@ type FreelancerProfile struct {
 	FirstName  string `gorm:"type:varchar(80)" json:"first_name"`
 	MiddleName string `gorm:"type:varchar(80)" json:"middle_name"`
 	LastName   string `gorm:"type:varchar(80)" json:"last_name"`
-	NIK string `gorm:"type:varchar(16);uniqueIndex;index" json:"nik"`
-
+	NIK        string `gorm:"type:varchar(16);uniqueIndex;index" json:"nik"`
 
 	KTPAddress string `gorm:"type:text" json:"ktp_address"`
 	PostalCode string `gorm:"type:varchar(10)" json:"postal_code"`
@@ -56,6 +57,9 @@ type FreelancerProfile struct {
 	ContactEmail   string `gorm:"type:varchar(150)" json:"contact_email"` // otomatis dari email user
 	ContactPhone   string `gorm:"type:varchar(30)" json:"contact_phone"`
 	CurrentAddress string `gorm:"type:text" json:"current_address"`
+
+	// Wallet
+	Balance int64 `gorm:"not null;default:0" json:"balance"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

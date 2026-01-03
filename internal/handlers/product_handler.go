@@ -30,12 +30,12 @@ func NewProductHandler(db *gorm.DB) *ProductHandler {
 // ==== REQUEST STRUCTS ====
 
 type PackageReq struct {
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	DeliveryDays int     `json:"delivery_days"` // dalam hari
-	Revisions   int      `json:"revisions"`
-	Price       int64    `json:"price"`
-	Benefits    []string `json:"benefits"`
+	Title        string   `json:"title"`
+	Description  string   `json:"description"`
+	DeliveryDays int      `json:"delivery_days"` // dalam hari
+	Revisions    int      `json:"revisions"`
+	Price        int64    `json:"price"`
+	Benefits     []string `json:"benefits"`
 }
 
 type PortfolioImageReq struct {
@@ -48,9 +48,9 @@ type ProductBasicReq struct {
 	Category  string `json:"category"`
 	BasePrice int64  `json:"base_price"`
 
-	VisibilityDescription string                 `json:"visibility_description"`
-	CoverURL              string                 `json:"cover_url"`        // kalau nanti sudah ada upload cover
-	CoverTransform        map[string]any         `json:"cover_transform"`  // { scale, pos: {x,y}, flipH, flipV }
+	VisibilityDescription string         `json:"visibility_description"`
+	CoverURL              string         `json:"cover_url"`       // kalau nanti sudah ada upload cover
+	CoverTransform        map[string]any `json:"cover_transform"` // { scale, pos: {x,y}, flipH, flipV }
 
 	Basic    PackageReq `json:"basic"`
 	Standard PackageReq `json:"standard"`
@@ -160,9 +160,9 @@ func (h *ProductHandler) CreateBasic(c *fiber.Ctx) error {
 		"success": true,
 		"message": "Produk berhasil disimpan",
 		"data": fiber.Map{
-			"id":      product.ID,
-			"status":  product.Status,
-			"title":   product.Title,
+			"id":       product.ID,
+			"status":   product.Status,
+			"title":    product.Title,
 			"category": product.Category,
 		},
 	})
@@ -240,7 +240,6 @@ func (h *ProductHandler) UploadCover(c *fiber.Ctx) error {
 	})
 }
 
-
 func (h *ProductHandler) ListMine(c *fiber.Ctx) error {
 	uid := c.Locals("userId")
 
@@ -261,11 +260,12 @@ func (h *ProductHandler) ListMine(c *fiber.Ctx) error {
 	for _, p := range products {
 		enc, _ := utils.EncryptID(p.ID, os.Getenv("ID_ENCRYPT_KEY"))
 		out = append(out, fiber.Map{
-			 "id":          enc,
-    		"real_id":     p.ID,
+			"id":         enc,
+			"real_id":    p.ID,
 			"title":      p.Title,
 			"category":   p.Category,
 			"base_price": p.BasePrice,
+			"cover_url":  p.CoverURL,
 			"status":     p.Status,
 			"created_at": p.CreatedAt,
 		})
@@ -276,8 +276,6 @@ func (h *ProductHandler) ListMine(c *fiber.Ctx) error {
 		"data":    out,
 	})
 }
-
-
 
 func (h *ProductHandler) GetOne(c *fiber.Ctx) error {
 	encID := c.Params("id")
@@ -304,164 +302,160 @@ func (h *ProductHandler) GetOne(c *fiber.Ctx) error {
 	})
 }
 
-
 func (h *ProductHandler) UploadPortfolioImage(c *fiber.Ctx) error {
-    uid := c.Locals("userId")
+	uid := c.Locals("userId")
 
-    file, err := c.FormFile("image")
-    if err != nil {
-        return c.Status(400).JSON(fiber.Map{
-            "success": false,
-            "message": "File tidak ditemukan",
-        })
-    }
+	file, err := c.FormFile("image")
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "File tidak ditemukan",
+		})
+	}
 
-    ext := strings.ToLower(filepath.Ext(file.Filename))
-    if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" {
-        return c.Status(400).JSON(fiber.Map{
-            "success": false,
-            "message": "Format tidak didukung",
-        })
-    }
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".webp" {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "Format tidak didukung",
+		})
+	}
 
-    uploadDir := "./uploads/portfolio"
-    os.MkdirAll(uploadDir, 0755)
+	uploadDir := "./uploads/portfolio"
+	os.MkdirAll(uploadDir, 0755)
 
-    filename := fmt.Sprintf("p_%v_%d%s", uid, time.Now().UnixNano(), ext)
-    savePath := filepath.Join(uploadDir, filename)
+	filename := fmt.Sprintf("p_%v_%d%s", uid, time.Now().UnixNano(), ext)
+	savePath := filepath.Join(uploadDir, filename)
 
-    if err := c.SaveFile(file, savePath); err != nil {
-        return c.Status(500).JSON(fiber.Map{
-            "success": false,
-            "message": "Gagal menyimpan gambar",
-        })
-    }
+	if err := c.SaveFile(file, savePath); err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal menyimpan gambar",
+		})
+	}
 
-    base := os.Getenv("APP_BASE_URL")
-    publicURL := "/uploads/portfolio/" + filename
-    if base != "" {
-        publicURL = base + publicURL
-    }
+	base := os.Getenv("APP_BASE_URL")
+	publicURL := "/uploads/portfolio/" + filename
+	if base != "" {
+		publicURL = base + publicURL
+	}
 
-    return c.JSON(fiber.Map{
-        "success": true,
-        "url":     publicURL,
-    })
+	return c.JSON(fiber.Map{
+		"success": true,
+		"url":     publicURL,
+	})
 }
-
 
 func (h *ProductHandler) UpdateProduct(c *fiber.Ctx) error {
-    encID := c.Params("id")
+	encID := c.Params("id")
 
-    rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
-    if err != nil {
-        return c.Status(400).JSON(fiber.Map{
-            "success": false,
-            "message": "Invalid product ID",
-        })
-    }
+	rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "Invalid product ID",
+		})
+	}
 
-    uid := c.Locals("userId")
+	uid := c.Locals("userId")
 
-    var product models.Product
-    if err := h.DB.First(&product, "id = ? AND user_id = ?", rawID, uid).Error; err != nil {
-        return c.Status(404).JSON(fiber.Map{
-            "success": false,
-            "message": "Produk tidak ditemukan",
-        })
-    }
+	var product models.Product
+	if err := h.DB.First(&product, "id = ? AND user_id = ?", rawID, uid).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"message": "Produk tidak ditemukan",
+		})
+	}
 
-    var req ProductBasicReq
-    if err := c.BodyParser(&req); err != nil {
-        return c.Status(400).JSON(fiber.Map{
-            "success": false,
-            "message": "Body request tidak valid",
-        })
-    }
+	var req ProductBasicReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "Body request tidak valid",
+		})
+	}
 
-    // packages
-    packagesPayload := map[string]PackageReq{
-        "basic":    req.Basic,
-        "standard": req.Standard,
-        "premium":  req.Premium,
-    }
-    packagesJSON, _ := json.Marshal(packagesPayload)
+	// packages
+	packagesPayload := map[string]PackageReq{
+		"basic":    req.Basic,
+		"standard": req.Standard,
+		"premium":  req.Premium,
+	}
+	packagesJSON, _ := json.Marshal(packagesPayload)
 
-    // portfolio
-    portfolioPayload := map[string]any{
-        "video_url": req.PortfolioVideoURL,
-        "images":    req.PortfolioImages,
-    }
-    portfolioJSON, _ := json.Marshal(portfolioPayload)
+	// portfolio
+	portfolioPayload := map[string]any{
+		"video_url": req.PortfolioVideoURL,
+		"images":    req.PortfolioImages,
+	}
+	portfolioJSON, _ := json.Marshal(portfolioPayload)
 
-    var coverTransformJSON []byte
-    if req.CoverTransform != nil {
-        coverTransformJSON, _ = json.Marshal(req.CoverTransform)
-    }
+	var coverTransformJSON []byte
+	if req.CoverTransform != nil {
+		coverTransformJSON, _ = json.Marshal(req.CoverTransform)
+	}
 
-    product.Title = req.Title
-    product.Category = req.Category
-    product.BasePrice = req.BasePrice
-    product.VisibilityDescription = req.VisibilityDescription
-    product.CoverURL = req.CoverURL
-    product.CoverTransform = datatypes.JSON(coverTransformJSON)
-    product.Packages = datatypes.JSON(packagesJSON)
-    product.Portfolio = datatypes.JSON(portfolioJSON)
+	product.Title = req.Title
+	product.Category = req.Category
+	product.BasePrice = req.BasePrice
+	product.VisibilityDescription = req.VisibilityDescription
+	product.CoverURL = req.CoverURL
+	product.CoverTransform = datatypes.JSON(coverTransformJSON)
+	product.Packages = datatypes.JSON(packagesJSON)
+	product.Portfolio = datatypes.JSON(portfolioJSON)
 
-    if req.Status != "" {
-        product.Status = req.Status
-    }
+	if req.Status != "" {
+		product.Status = req.Status
+	}
 
-    if err := h.DB.Save(&product).Error; err != nil {
-        return c.Status(500).JSON(fiber.Map{
-            "success": false,
-            "message": "Gagal memperbarui produk",
-        })
-    }
+	if err := h.DB.Save(&product).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal memperbarui produk",
+		})
+	}
 
-    return c.JSON(fiber.Map{
-        "success": true,
-        "message": "Produk berhasil diperbarui",
-    })
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Produk berhasil diperbarui",
+	})
 }
-
 
 func (h *ProductHandler) Delete(c *fiber.Ctx) error {
-    uid := c.Locals("userId")
+	uid := c.Locals("userId")
 
-    encID := c.Params("id")
-    rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
-    if err != nil {
-        return c.Status(400).JSON(fiber.Map{
-            "success": false,
-            "message": "ID produk tidak valid",
-        })
-    }
+	encID := c.Params("id")
+	rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "ID produk tidak valid",
+		})
+	}
 
-    var product models.Product
-    if err := h.DB.
-        Where("id = ? AND user_id = ?", rawID, uid).
-        First(&product).Error; err != nil {
+	var product models.Product
+	if err := h.DB.
+		Where("id = ? AND user_id = ?", rawID, uid).
+		First(&product).Error; err != nil {
 
-        return c.Status(404).JSON(fiber.Map{
-            "success": false,
-            "message": "Produk tidak ditemukan",
-        })
-    }
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"message": "Produk tidak ditemukan",
+		})
+	}
 
-    if err := h.DB.Delete(&product).Error; err != nil {
-        return c.Status(500).JSON(fiber.Map{
-            "success": false,
-            "message": "Gagal menghapus produk",
-        })
-    }
+	if err := h.DB.Delete(&product).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal menghapus produk",
+		})
+	}
 
-    return c.JSON(fiber.Map{
-        "success": true,
-        "message": "Produk berhasil dihapus",
-    })
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Produk berhasil dihapus",
+	})
 }
-
 
 func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 	type Result struct {
@@ -503,7 +497,6 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 		Where("products.status = ?", "published")
 
 	// ===== FILTER =====
-	
 
 	if qSearch != "" {
 		q = q.Where("LOWER(products.title) LIKE ?", "%"+strings.ToLower(qSearch)+"%")
@@ -533,12 +526,12 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 	for _, r := range rows {
 
 		encID, err := utils.EncryptID(r.ID, os.Getenv("ID_ENCRYPT_KEY"))
-    if err != nil {
-        return c.Status(500).JSON(fiber.Map{
-            "success": false,
-            "message": "Gagal mengenkripsi ID produk",
-        })
-    }
+		if err != nil {
+			return c.Status(500).JSON(fiber.Map{
+				"success": false,
+				"message": "Gagal mengenkripsi ID produk",
+			})
+		}
 
 		name := r.SystemName
 		if name == "" {
@@ -554,7 +547,7 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 		}
 
 		out = append(out, fiber.Map{
-			 "id":       encID,
+			"id":       encID,
 			"title":    r.Title,
 			"category": r.Category,
 			"price":    r.BasePrice,
@@ -563,7 +556,7 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 			"sold":     0,
 			"seller": fiber.Map{
 				"name":      name,
-				"title": "Freelancer",
+				"title":     "Freelancer",
 				"level":     level,
 				"photo_url": r.PhotoURL,
 			},
@@ -578,9 +571,7 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 
 func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 	encID := c.Params("id")
-	
-	
-	
+
 	// Decrypt ID
 	rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
 	if err != nil {
@@ -591,13 +582,11 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 		})
 	}
 
-	
-
 	var product models.Product
 
 	// Coba dulu tanpa filter status untuk debug
 	if err := h.DB.First(&product, "id = ?", rawID).Error; err != nil {
-		
+
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"message": "Produk tidak ditemukan",
@@ -608,11 +597,9 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 		})
 	}
 
-	
-
 	// Cek status
 	if product.Status != "published" {
-		
+
 		return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
 			"success": false,
 			"message": "Produk belum dipublikasikan",
@@ -625,15 +612,14 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 	// Get freelancer profile
 	var profile models.FreelancerProfile
 	if err := h.DB.Where("user_id = ?", product.UserID).First(&profile).Error; err != nil {
-		
+
 	}
 
-	
 	// Parse packages JSON
 	var packages map[string]interface{}
 	if len(product.Packages) > 0 {
 		if err := json.Unmarshal(product.Packages, &packages); err != nil {
-			
+
 		}
 	}
 
@@ -641,7 +627,7 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 	var portfolio map[string]interface{}
 	if len(product.Portfolio) > 0 {
 		if err := json.Unmarshal(product.Portfolio, &portfolio); err != nil {
-			
+
 		}
 	}
 
@@ -649,7 +635,7 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 	var coverTransform map[string]interface{}
 	if len(product.CoverTransform) > 0 {
 		if err := json.Unmarshal(product.CoverTransform, &coverTransform); err != nil {
-			
+
 		}
 	}
 

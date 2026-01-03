@@ -934,13 +934,13 @@ func (h *JobOfferHandler) CompleteOrder(c *fiber.Ctx) error {
 		} else {
 			// 3. Create Wallet Transaction Record
 			walletTrx := models.WalletTransaction{
-				ID:                  uuid.New(),
-				FreelancerProfileID: profile.ID,
-				Amount:              offer.NetAmount,
-				Type:                models.WalletTrxCredit,
-				Description:         "Pembayaran pesanan #" + offer.OrderCode,
-				ReferenceID:         &offer.ID,
-				CreatedAt:           time.Now(),
+				ID:          uuid.New(),
+				UserID:      offer.FreelancerID, // Use UserID directly
+				Amount:      offer.NetAmount,
+				Type:        models.WalletTrxCredit,
+				Description: "Pembayaran pesanan #" + offer.OrderCode,
+				ReferenceID: &offer.ID,
+				CreatedAt:   time.Now(),
 			}
 			h.DB.Create(&walletTrx)
 		}
@@ -1023,13 +1023,13 @@ func (h *JobOfferHandler) scanAndCompleteOrders() {
 				tx.Save(&profile)
 
 				walletTrx := models.WalletTransaction{
-					ID:                  uuid.New(),
-					FreelancerProfileID: profile.ID,
-					Amount:              offer.NetAmount,
-					Type:                models.WalletTrxCredit,
-					Description:         "Penyelesaian otomatis pesanan #" + offer.OrderCode + " (3 hari setelah pengiriman)",
-					ReferenceID:         &offer.ID,
-					CreatedAt:           time.Now(),
+					ID:          uuid.New(),
+					UserID:      offer.FreelancerID,
+					Amount:      offer.NetAmount,
+					Type:        models.WalletTrxCredit,
+					Description: "Penyelesaian otomatis pesanan #" + offer.OrderCode + " (3 hari setelah pengiriman)",
+					ReferenceID: &offer.ID,
+					CreatedAt:   time.Now(),
 				}
 				tx.Create(&walletTrx)
 			}
@@ -1067,4 +1067,84 @@ func (h *JobOfferHandler) scanAndCompleteOrders() {
 			return nil
 		})
 	}
+}
+
+// CancelOrder handles order cancellation by freelancer
+func (h *JobOfferHandler) CancelOrder(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	userUUID, _ := uuid.Parse(userID.(string))
+	offerID := c.Params("id")
+	offerUUID, err := uuid.Parse(offerID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
+	}
+
+	var offer models.JobOffer
+	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
+	}
+
+	// Only freelancer can cancel (as requested)
+	if offer.FreelancerID != userUUID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the freelancer can cancel this order"})
+	}
+
+	// Status check: only pending orders can be cancelled (as requested)
+	if offer.Status != models.OfferStatusPending {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Hanya pesanan yang belum dibayar yang dapat dibatalkan"})
+	}
+
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		// 1. Update status
+		offer.Status = models.OfferStatusCancelled
+		offer.UpdatedAt = time.Now()
+		if err := tx.Save(&offer).Error; err != nil {
+			return err
+		}
+
+		// 2. Clear Refund logic as unreachable for pending orders
+		// (Optional: keep if you want it to be robust, but user said pending only)
+
+		// 3. Create System Message
+		msg := models.Message{
+			ID:             uuid.New(),
+			ConversationID: offer.ConversationID,
+			SenderID:       userUUID,
+			Type:           "system",
+			Text:           "Pesanan #" + offer.OrderCode + " telah dibatalkan oleh freelancer.",
+			CreatedAt:      time.Now(),
+		}
+		tx.Create(&msg)
+
+		// 4. Broadcast
+		h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+			"type": "new_message",
+			"message": fiber.Map{
+				"id":              msg.ID.String(),
+				"conversation_id": msg.ConversationID.String(),
+				"sender_id":       msg.SenderID.String(),
+				"text":            msg.Text,
+				"type":            msg.Type,
+				"created_at":      msg.CreatedAt,
+			},
+			"offer": toJobOfferResponse(&offer),
+		})
+
+		h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+			"type":  "offer_status_update",
+			"offer": toJobOfferResponse(&offer),
+		})
+
+		return nil
+	})
+
+	if err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to cancel order"})
+	}
+
+	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&offer)})
 }

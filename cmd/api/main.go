@@ -206,6 +206,7 @@ func main() {
 	protected.Post("/job-offers/:id/deliver", offerH.DeliverWork) // Deliver work
 	protected.Post("/job-offers/:id/revision", offerH.RequestRevision)
 	protected.Post("/job-offers/:id/complete", offerH.CompleteOrder)
+	protected.Post("/job-offers/:id/cancel", offerH.CancelOrder)
 
 	// Payments
 	protected.Get("/payments/channels", paymentH.GetChannels)

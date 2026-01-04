@@ -73,6 +73,7 @@ func (s *TripayService) CreateTransaction(
 	customerName, customerEmail, customerPhone string,
 	itemName string,
 	method string,
+	returnUrl string,
 ) (*TransactionResponse, error) {
 
 	// 1. Calculate Signature
@@ -126,7 +127,7 @@ func (s *TripayService) CreateTransaction(
 			},
 		},
 		Callback:    baseURL + "/tripay/callback",
-		ReturnUrl:   frontendURL + "/chat", // Redirect back to chat
+		ReturnUrl:   returnUrl,
 		ExpiredTime: time.Now().Add(24 * time.Hour).Unix(),
 		Signature:   signature,
 	}

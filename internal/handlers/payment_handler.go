@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"strconv"
 	"time"
 
@@ -126,6 +128,12 @@ func (h *PaymentHandler) CreatePayment(c *fiber.Ctx) error {
 	totalFee := flatFee + (float64(offer.Price) * percentFee / 100)
 	totalAmount := offer.Price + int64(math.Ceil(totalFee))
 
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://127.0.0.1:3000"
+	}
+	returnUrl := fmt.Sprintf("%s/chat?cid=%s", frontendURL, offer.ConversationID.String())
+
 	resp, err := h.TripayService.CreateTransaction(
 		merchantRef,
 		totalAmount,
@@ -134,6 +142,7 @@ func (h *PaymentHandler) CreatePayment(c *fiber.Ctx) error {
 		clientPhone,
 		offer.Title,
 		req.PaymentMethod,
+		returnUrl,
 	)
 
 	if err != nil {
@@ -141,24 +150,45 @@ func (h *PaymentHandler) CreatePayment(c *fiber.Ctx) error {
 		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Payment gateway error: " + err.Error()})
 	}
 
-	// Create Transaction Record
-	trx := models.Transaction{
-		JobOfferID:        offer.ID,
-		Reference:         resp.Data.Reference,
-		MerchantRef:       resp.Data.MerchantRef,
-		TotalAmount:       resp.Data.Amount,
-		PaymentMethodCode: req.PaymentMethod,
-		PaymentMethod:     req.PaymentMethod, // Initial assumption, detailed name comes from callback or channel list
-		CheckoutURL:       resp.Data.CheckoutURL,
-		Status:            models.TransactionStatusUnpaid,
-		// Store estimated fees initially
-		FeeCustomer: int64(math.Ceil(totalFee)),
-		TotalFee:    int64(math.Ceil(totalFee)),
-	}
-
-	if err := h.DB.Create(&trx).Error; err != nil {
-		log.Printf("Failed to save transaction: %v", err)
-		// Don't fail the request, just log. The user can still pay via Tripay link.
+	// Create or Update Transaction Record
+	var trx models.Transaction
+	err = h.DB.Where("merchant_ref = ?", merchantRef).First(&trx).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// New Transaction
+			trx = models.Transaction{
+				JobOfferID:        offer.ID,
+				Reference:         resp.Data.Reference,
+				MerchantRef:       resp.Data.MerchantRef,
+				TotalAmount:       resp.Data.Amount,
+				PaymentMethodCode: req.PaymentMethod,
+				PaymentMethod:     req.PaymentMethod,
+				CheckoutURL:       resp.Data.CheckoutURL,
+				Status:            models.TransactionStatusUnpaid,
+				FeeCustomer:       int64(math.Ceil(totalFee)),
+				TotalFee:          int64(math.Ceil(totalFee)),
+			}
+			if err := h.DB.Create(&trx).Error; err != nil {
+				log.Printf("Failed to create transaction: %v", err)
+			}
+		} else {
+			log.Printf("DB error checking existing transaction: %v", err)
+		}
+	} else {
+		// Update existing UNPAID/FAILED transaction with new Tripay reference
+		if trx.Status != models.TransactionStatusPaid {
+			trx.Reference = resp.Data.Reference
+			trx.CheckoutURL = resp.Data.CheckoutURL
+			trx.Status = models.TransactionStatusUnpaid
+			trx.TotalAmount = resp.Data.Amount
+			trx.PaymentMethodCode = req.PaymentMethod
+			trx.PaymentMethod = req.PaymentMethod
+			trx.FeeCustomer = int64(math.Ceil(totalFee))
+			trx.TotalFee = int64(math.Ceil(totalFee))
+			if err := h.DB.Save(&trx).Error; err != nil {
+				log.Printf("Failed to update transaction: %v", err)
+			}
+		}
 	}
 
 	return c.JSON(fiber.Map{
@@ -211,7 +241,10 @@ func (h *PaymentHandler) HandleCallback(c *fiber.Ctx) error {
 		var trx models.Transaction
 		// Lock the row for update to prevent race conditions (Double Callback)
 		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("reference = ?", payload.Reference).First(&trx).Error; err != nil {
-			log.Printf("Transaction not found for ref: %s", payload.Reference)
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("Transaction not found for ref: %s. Ignoring callback.", payload.Reference)
+				return nil // Return nil specifically to stop transaction and return success to Tripay
+			}
 			return err
 		}
 

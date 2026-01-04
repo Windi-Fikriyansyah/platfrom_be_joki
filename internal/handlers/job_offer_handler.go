@@ -723,9 +723,10 @@ func (h *JobOfferHandler) DeliverWork(c *fiber.Ctx) error {
 		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the assigned freelancer can deliver work"})
 	}
 
-	// Only allow delivery if paid or working
-	if offer.Status != models.OfferStatusPaid && offer.Status != models.OfferStatusWorking {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Order must be in 'Paid' or 'Working' status to deliver"})
+	// Allow delivery if paid, working, or already delivered (for updates)
+	isUpdate := offer.Status == models.OfferStatusDelivered
+	if !isUpdate && offer.Status != models.OfferStatusPaid && offer.Status != models.OfferStatusWorking {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Order must be in 'Paid', 'Working', or 'Delivered' status to deliver"})
 	}
 
 	workURL := c.FormValue("work_url")
@@ -777,11 +778,16 @@ func (h *JobOfferHandler) DeliverWork(c *fiber.Ctx) error {
 	}
 
 	// Create Delivery System Message
+	msgText := "Freelancer mengirimkan pekerjaan untuk ditinjau dan disetujui.\n\nPembeli dapat meminta revisi dalam kurun waktu 7 hari. Jika tidak ada respon dalam jangka waktu yang ditentukan, sistem akan secara otomatis menyetujui pekerjaan untuk freelancer."
+	if isUpdate {
+		msgText = "Freelancer telah memperbarui hasil pekerjaan.\n\nSilakan tinjau kembali hasil pekerjaan terbaru yang telah dikirimkan."
+	}
+
 	msg := models.Message{
 		ID:             uuid.New(),
 		ConversationID: offer.ConversationID,
 		SenderID:       userUUID,
-		Text:           "Freelancer mengirimkan pekerjaan untuk ditinjau dan disetujui.\n\nPembeli dapat meminta revisi dalam kurun waktu 7 hari. Jika tidak ada respon dalam jangka waktu yang ditentukan, sistem akan secara otomatis menyetujui pekerjaan untuk freelancer.",
+		Text:           msgText,
 		Type:           "delivery", // Special type for custom rendering
 		IsRead:         false,
 	}

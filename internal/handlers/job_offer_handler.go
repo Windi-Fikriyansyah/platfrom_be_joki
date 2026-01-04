@@ -10,6 +10,7 @@ import (
 
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/realtime"
+	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/wallet"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -17,13 +18,14 @@ import (
 )
 
 type JobOfferHandler struct {
-	DB  *gorm.DB
-	Hub *realtime.Hub
-	RDB *redis.Client
+	DB            *gorm.DB
+	Hub           *realtime.Hub
+	RDB           *redis.Client
+	WalletService *wallet.WalletService
 }
 
-func NewJobOfferHandler(db *gorm.DB, hub *realtime.Hub, rdb *redis.Client) *JobOfferHandler {
-	return &JobOfferHandler{DB: db, Hub: hub, RDB: rdb}
+func NewJobOfferHandler(db *gorm.DB, hub *realtime.Hub, rdb *redis.Client, walletService *wallet.WalletService) *JobOfferHandler {
+	return &JobOfferHandler{DB: db, Hub: hub, RDB: rdb, WalletService: walletService}
 }
 
 // CreateOfferRequest is the request body for creating a job offer
@@ -904,83 +906,90 @@ func (h *JobOfferHandler) CompleteOrder(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
 	}
 
-	var offer models.JobOffer
-	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
-		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
-	}
-
-	if offer.ClientID != userUUID {
-		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the client can complete the order"})
-	}
-
-	if offer.Status != models.OfferStatusDelivered {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Only delivered orders can be completed"})
-	}
-
-	// Update Offer
-	offer.Status = models.OfferStatusCompleted
-	offer.UpdatedAt = time.Now()
-
-	// ESCROW RELEASE LOGIC
-	// 1. Get Freelancer Profile
-	var profile models.FreelancerProfile
-	if err := h.DB.Where("user_id = ?", offer.FreelancerID).First(&profile).Error; err != nil {
-		log.Printf("Freelancer profile not found for balance release: %v", err)
-	} else {
-		// 2. Add to Balance (Net Amount)
-		profile.Balance += offer.NetAmount
-		if err := h.DB.Save(&profile).Error; err != nil {
-			log.Printf("Failed to update freelancer balance: %v", err)
-		} else {
-			// 3. Create Wallet Transaction Record
-			walletTrx := models.WalletTransaction{
-				ID:          uuid.New(),
-				UserID:      offer.FreelancerID, // Use UserID directly
-				Amount:      offer.NetAmount,
-				Type:        models.WalletTrxCredit,
-				Description: "Pembayaran pesanan #" + offer.OrderCode,
-				ReferenceID: &offer.ID,
-				CreatedAt:   time.Now(),
-			}
-			h.DB.Create(&walletTrx)
+	err = h.DB.Transaction(func(tx *gorm.DB) error {
+		var offer models.JobOffer
+		// Lock the offer row for update (Idempotency / Race condition prevention)
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&offer, "id = ?", offerUUID).Error; err != nil {
+			return err
 		}
-	}
 
-	if err := h.DB.Save(&offer).Error; err != nil {
-		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to complete order"})
-	}
+		if offer.ClientID != userUUID {
+			return fiber.NewError(403, "Only the client can complete the order")
+		}
 
-	// Create System Message
-	msg := models.Message{
-		ID:             uuid.New(),
-		ConversationID: offer.ConversationID,
-		SenderID:       userUUID,
-		Text:           "Pesanan telah diselesaikan oleh pembeli. Terima kasih telah menggunakan Jokiin!",
-		Type:           "system",
-		IsRead:         false,
-	}
-	h.DB.Create(&msg)
+		// IDEMPOTENCY: If already completed, just return
+		if offer.Status == models.OfferStatusCompleted {
+			log.Printf("Offer %s already completed (Idempotency)", offer.ID)
+			return nil
+		}
 
-	// Broadcast Updates
-	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
-		"type": "new_message",
-		"message": fiber.Map{
-			"id":              msg.ID.String(),
-			"conversation_id": msg.ConversationID.String(),
-			"sender_id":       msg.SenderID.String(),
-			"text":            msg.Text,
-			"type":            msg.Type,
-			"created_at":      msg.CreatedAt,
-		},
-		"offer": toJobOfferResponse(&offer),
+		if offer.Status != models.OfferStatusDelivered {
+			return fiber.NewError(400, "Only delivered orders can be completed")
+		}
+
+		// 1. Update Offer Status
+		offer.Status = models.OfferStatusCompleted
+		offer.UpdatedAt = time.Now()
+		if err := tx.Save(&offer).Error; err != nil {
+			return err
+		}
+
+		// 2. ESCROW RELEASE LOGIC via WalletService
+		desc := "Pembayaran pesanan #" + offer.OrderCode
+		if err := h.WalletService.CreditFreelancer(tx, offer.FreelancerID, offer.NetAmount, offer.ID, desc); err != nil {
+			log.Printf("Failed to release escrow for offer %s: %v", offer.ID, err)
+			return err
+		}
+
+		// 3. Create System Message
+		msg := models.Message{
+			ID:             uuid.New(),
+			ConversationID: offer.ConversationID,
+			SenderID:       userUUID,
+			Text:           "Pesanan telah diselesaikan oleh pembeli. Dana telah diteruskan ke saldo Freelancer. Terima kasih!",
+			Type:           "system",
+			IsRead:         false,
+			CreatedAt:      time.Now(),
+		}
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
+
+		// Broadcast Updates (We can do this after commit if preferred, but doing inside is common for simple hubs)
+		h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+			"type": "new_message",
+			"message": fiber.Map{
+				"id":              msg.ID.String(),
+				"conversation_id": msg.ConversationID.String(),
+				"sender_id":       msg.SenderID.String(),
+				"text":            msg.Text,
+				"type":            msg.Type,
+				"created_at":      msg.CreatedAt,
+			},
+		})
+
+		return nil
 	})
 
-	h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+	if err != nil {
+		if e, ok := err.(*fiber.Error); ok {
+			return c.Status(e.Code).JSON(fiber.Map{"success": false, "message": e.Message})
+		}
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to complete order: " + err.Error()})
+	}
+
+	// Reload to get updated status and potentially other info for response
+	var finalOffer models.JobOffer
+	h.DB.Preload("Freelancer").Preload("Freelancer.FreelancerProfile").
+		Preload("Client").Preload("Product").
+		First(&finalOffer, "id = ?", offerUUID)
+
+	h.Hub.SendToConversation(finalOffer.ClientID, finalOffer.FreelancerID, fiber.Map{
 		"type":  "offer_status_update",
-		"offer": toJobOfferResponse(&offer),
+		"offer": toJobOfferResponse(&finalOffer),
 	})
 
-	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&offer)})
+	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&finalOffer)})
 }
 
 // StartAutoCompletionWorker runs a background job to complete orders after 3 days of delivery
@@ -1009,44 +1018,45 @@ func (h *JobOfferHandler) scanAndCompleteOrders() {
 		log.Printf("[AutoCompletionWorker] Auto-completing Offer %s (Order: %s)", offer.ID, offer.OrderCode)
 
 		h.DB.Transaction(func(tx *gorm.DB) error {
-			// 1. Update status
-			offer.Status = models.OfferStatusCompleted
-			offer.UpdatedAt = time.Now()
-			if err := tx.Save(&offer).Error; err != nil {
+			// Lock row
+			var currentOffer models.JobOffer
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&currentOffer, "id = ?", offer.ID).Error; err != nil {
 				return err
 			}
 
-			// 2. Release Balance
-			var profile models.FreelancerProfile
-			if err := tx.Where("user_id = ?", offer.FreelancerID).First(&profile).Error; err == nil {
-				profile.Balance += offer.NetAmount
-				tx.Save(&profile)
+			// Idempotency
+			if currentOffer.Status != models.OfferStatusDelivered {
+				return nil
+			}
 
-				walletTrx := models.WalletTransaction{
-					ID:          uuid.New(),
-					UserID:      offer.FreelancerID,
-					Amount:      offer.NetAmount,
-					Type:        models.WalletTrxCredit,
-					Description: "Penyelesaian otomatis pesanan #" + offer.OrderCode + " (3 hari setelah pengiriman)",
-					ReferenceID: &offer.ID,
-					CreatedAt:   time.Now(),
-				}
-				tx.Create(&walletTrx)
+			// 1. Update status
+			currentOffer.Status = models.OfferStatusCompleted
+			currentOffer.UpdatedAt = time.Now()
+			if err := tx.Save(&currentOffer).Error; err != nil {
+				return err
+			}
+
+			// 2. Release Escrow via WalletService
+			desc := "Penyelesaian otomatis pesanan #" + currentOffer.OrderCode + " (tanpa respon dari pembeli)"
+			if err := h.WalletService.CreditFreelancer(tx, currentOffer.FreelancerID, currentOffer.NetAmount, currentOffer.ID, desc); err != nil {
+				return err
 			}
 
 			// 3. Create System Message
 			msg := models.Message{
 				ID:             uuid.New(),
-				ConversationID: offer.ConversationID,
-				SenderID:       offer.FreelancerID, // Use freelancer as sender for auto-msg
+				ConversationID: currentOffer.ConversationID,
+				SenderID:       currentOffer.FreelancerID,
 				Type:           "system",
-				Text:           "Pesanan telah diselesaikan secara otomatis oleh sistem (3 hari setelah pengiriman tanpa respon).",
+				Text:           "Pesanan telah diselesaikan secara otomatis oleh sistem (3 hari setelah pengiriman tanpa respon). Dana diteruskan ke Freelancer.",
 				CreatedAt:      time.Now(),
 			}
-			tx.Create(&msg)
+			if err := tx.Create(&msg).Error; err != nil {
+				return err
+			}
 
-			// 4. Broadcast via WebSocket
-			h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+			// 4. Broadcast
+			h.Hub.SendToConversation(currentOffer.ClientID, currentOffer.FreelancerID, fiber.Map{
 				"type": "new_message",
 				"message": fiber.Map{
 					"id":              msg.ID.String(),
@@ -1056,12 +1066,11 @@ func (h *JobOfferHandler) scanAndCompleteOrders() {
 					"type":            msg.Type,
 					"created_at":      msg.CreatedAt,
 				},
-				"offer": toJobOfferResponse(&offer),
 			})
 
-			h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+			h.Hub.SendToConversation(currentOffer.ClientID, currentOffer.FreelancerID, fiber.Map{
 				"type":  "offer_status_update",
-				"offer": toJobOfferResponse(&offer),
+				"offer": toJobOfferResponse(&currentOffer),
 			})
 
 			return nil
@@ -1093,35 +1102,59 @@ func (h *JobOfferHandler) CancelOrder(c *fiber.Ctx) error {
 		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the freelancer can cancel this order"})
 	}
 
-	// Status check: only pending orders can be cancelled (as requested)
-	if offer.Status != models.OfferStatusPending {
-		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Hanya pesanan yang belum dibayar yang dapat dibatalkan"})
+	// Allow cancelling pending OR paid orders
+	if offer.Status != models.OfferStatusPending && offer.Status != models.OfferStatusPaid {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Hanya pesanan pending atau berstatus paid yang dapat dibatalkan"})
 	}
 
 	err = h.DB.Transaction(func(tx *gorm.DB) error {
-		// 1. Update status
-		offer.Status = models.OfferStatusCancelled
-		offer.UpdatedAt = time.Now()
-		if err := tx.Save(&offer).Error; err != nil {
+		// Lock row
+		var currentOffer models.JobOffer
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").First(&currentOffer, "id = ?", offer.ID).Error; err != nil {
 			return err
 		}
 
-		// 2. Clear Refund logic as unreachable for pending orders
-		// (Optional: keep if you want it to be robust, but user said pending only)
+		// Idempotency
+		if currentOffer.Status == models.OfferStatusCancelled {
+			return nil
+		}
+
+		// 1. Refund logic if already PAID
+		if currentOffer.Status == models.OfferStatusPaid {
+			desc := "Pengembalian dana untuk pembatalan pesanan #" + currentOffer.OrderCode
+			// Refund to Client's platform balance
+			if err := h.WalletService.CreditClient(tx, currentOffer.ClientID, currentOffer.Price, currentOffer.ID, desc); err != nil {
+				return err
+			}
+		}
+
+		// 2. Update status
+		currentOffer.Status = models.OfferStatusCancelled
+		currentOffer.UpdatedAt = time.Now()
+		if err := tx.Save(&currentOffer).Error; err != nil {
+			return err
+		}
 
 		// 3. Create System Message
+		cancelMsg := "Pesanan #" + currentOffer.OrderCode + " telah dibatalkan oleh freelancer."
+		if currentOffer.Status == models.OfferStatusCancelled && offer.Status == models.OfferStatusPaid {
+			cancelMsg += " Dana telah dikembalikan ke saldo Jokiin Anda."
+		}
+
 		msg := models.Message{
 			ID:             uuid.New(),
-			ConversationID: offer.ConversationID,
+			ConversationID: currentOffer.ConversationID,
 			SenderID:       userUUID,
 			Type:           "system",
-			Text:           "Pesanan #" + offer.OrderCode + " telah dibatalkan oleh freelancer.",
+			Text:           cancelMsg,
 			CreatedAt:      time.Now(),
 		}
-		tx.Create(&msg)
+		if err := tx.Create(&msg).Error; err != nil {
+			return err
+		}
 
 		// 4. Broadcast
-		h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		h.Hub.SendToConversation(currentOffer.ClientID, currentOffer.FreelancerID, fiber.Map{
 			"type": "new_message",
 			"message": fiber.Map{
 				"id":              msg.ID.String(),
@@ -1131,12 +1164,11 @@ func (h *JobOfferHandler) CancelOrder(c *fiber.Ctx) error {
 				"type":            msg.Type,
 				"created_at":      msg.CreatedAt,
 			},
-			"offer": toJobOfferResponse(&offer),
 		})
 
-		h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
+		h.Hub.SendToConversation(currentOffer.ClientID, currentOffer.FreelancerID, fiber.Map{
 			"type":  "offer_status_update",
-			"offer": toJobOfferResponse(&offer),
+			"offer": toJobOfferResponse(&currentOffer),
 		})
 
 		return nil

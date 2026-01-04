@@ -18,6 +18,7 @@ import (
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/realtime"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/tripay"
+	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/wallet"
 )
 
 func main() {
@@ -70,6 +71,7 @@ func main() {
 
 	// Services
 	tripayService := tripay.NewTripayService()
+	walletService := wallet.NewWalletService(gdb)
 
 	// Handlers
 	authH := &handlers.AuthHandler{
@@ -81,9 +83,9 @@ func main() {
 	// freelancerH not available/used, skipping
 	productH := handlers.NewProductHandler(gdb)
 	categoryH := handlers.NewCategoryHandler(gdb)
-	offerH := handlers.NewJobOfferHandler(gdb, hub, rdb)
+	offerH := handlers.NewJobOfferHandler(gdb, hub, rdb, walletService)
 	offerH.StartAutoCompletionWorker()
-	paymentH := handlers.NewPaymentHandler(gdb, tripayService, hub)
+	paymentH := handlers.NewPaymentHandler(gdb, tripayService, hub, walletService)
 
 	// Public Callbacks (Root level to avoid middleware issues)
 	app.Post("/tripay/callback", paymentH.HandleCallback)

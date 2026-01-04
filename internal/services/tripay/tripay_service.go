@@ -103,7 +103,7 @@ func (s *TripayService) CreateTransaction(
 		baseURL = os.Getenv("APP_BASE_URL")
 	}
 	if baseURL == "" {
-		baseURL = "https://dcbda7c22dfd.ngrok-free.app" // Default local backend
+		baseURL = "https://2a117ce1bea3.ngrok-free.app" // Default local backend
 	}
 
 	frontendURL := os.Getenv("FRONTEND_URL")

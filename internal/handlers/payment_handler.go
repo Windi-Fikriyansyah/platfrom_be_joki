@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"math"
 	"strconv"
@@ -9,7 +10,9 @@ import (
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/realtime"
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/tripay"
+	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/services/wallet"
 	"github.com/gofiber/fiber/v2"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -17,10 +20,11 @@ type PaymentHandler struct {
 	DB            *gorm.DB
 	TripayService *tripay.TripayService
 	Hub           *realtime.Hub
+	WalletService *wallet.WalletService
 }
 
-func NewPaymentHandler(db *gorm.DB, tripayService *tripay.TripayService, hub *realtime.Hub) *PaymentHandler {
-	return &PaymentHandler{DB: db, TripayService: tripayService, Hub: hub}
+func NewPaymentHandler(db *gorm.DB, tripayService *tripay.TripayService, hub *realtime.Hub, walletService *wallet.WalletService) *PaymentHandler {
+	return &PaymentHandler{DB: db, TripayService: tripayService, Hub: hub, WalletService: walletService}
 }
 
 type CreatePaymentRequest struct {
@@ -202,15 +206,23 @@ func (h *PaymentHandler) HandleCallback(c *fiber.Ctx) error {
 		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid payload"})
 	}
 
-	// 4. Update Transaction Record
-	var trx models.Transaction
-	if err := h.DB.Where("reference = ?", payload.Reference).First(&trx).Error; err != nil {
-		log.Printf("Transaction not found for ref: %s", payload.Reference)
-		// Not returning error to Tripay, but log it. We might need to handle 'not found' case properly
-		// or maybe recreate it? Unlikely if CreatePayment succeeded.
-	} else {
+	// 4. Update Transaction & Offer in a DB TRANSACTION
+	err := h.DB.Transaction(func(tx *gorm.DB) error {
+		var trx models.Transaction
+		// Lock the row for update to prevent race conditions (Double Callback)
+		if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("reference = ?", payload.Reference).First(&trx).Error; err != nil {
+			log.Printf("Transaction not found for ref: %s", payload.Reference)
+			return err
+		}
+
+		// IDEMPOTENCY CHECK: If already PAID, just return success
+		if trx.Status == models.TransactionStatusPaid {
+			log.Printf("Transaction %s already processed (Idempotency)", payload.Reference)
+			return nil
+		}
+
 		// Update fields
-		trx.Status = models.TransactionStatus(payload.Status) // Assuming status strings match (PAID, FAILED, etc)
+		trx.Status = models.TransactionStatus(payload.Status)
 		trx.PaymentMethod = payload.PaymentMethod
 		trx.PaymentMethodCode = payload.PaymentMethodCode
 		trx.TotalAmount = payload.TotalAmount
@@ -225,32 +237,55 @@ func (h *PaymentHandler) HandleCallback(c *fiber.Ctx) error {
 			trx.PaidAt = &t
 		}
 
-		h.DB.Save(&trx)
+		if err := tx.Save(&trx).Error; err != nil {
+			return err
+		}
+
+		// 5. Update Offer Status
+		if payload.Status == "PAID" {
+			// Extract Order Code from MerchantRef "INV-{OrderCode}"
+			if len(payload.MerchantRef) < 5 {
+				return fmt.Errorf("invalid merchant ref: %s", payload.MerchantRef)
+			}
+			orderCode := payload.MerchantRef[4:]
+
+			var offer models.JobOffer
+			if err := tx.Set("gorm:query_option", "FOR UPDATE").Where("order_code = ?", orderCode).First(&offer).Error; err != nil {
+				log.Printf("Offer not found for callback ref: %s", payload.MerchantRef)
+				return err
+			}
+
+			// If offer already paid or further, skip (Idempotency at Offer level)
+			if offer.Status != models.OfferStatusPending {
+				log.Printf("Offer %s already in status %s, skipping", offer.OrderCode, offer.Status)
+				return nil
+			}
+
+			// Update Status to PAID (Escrow - Funds are held by platform)
+			offer.Status = models.OfferStatusPaid
+			if err := tx.Save(&offer).Error; err != nil {
+				return err
+			}
+
+			// Broadcast update (deferred after transaction commit would be better, but hub is fine for now)
+			// Actually let's just do it here, or after the transaction block
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("Error processing callback: %v", err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Processing error"})
 	}
 
-	// 5. Update Offer Status
+	// Post-transaction actions (Broadcasting)
 	if payload.Status == "PAID" {
-		// Extract Order Code from MerchantRef "INV-{OrderCode}"
-		if len(payload.MerchantRef) < 5 {
-			return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid merchant ref"})
-		}
 		orderCode := payload.MerchantRef[4:]
-
 		var offer models.JobOffer
-		if err := h.DB.Where("order_code = ?", orderCode).First(&offer).Error; err != nil {
-			log.Printf("Offer not found for callback ref: %s", payload.MerchantRef)
-			return c.JSON(fiber.Map{"success": false, "message": "Offer not found, but ignored"})
-		}
-
-		// Update Status
-		if offer.Status == models.OfferStatusPending {
-			offer.Status = models.OfferStatusPaid
-			h.DB.Save(&offer)
-
-			// Broadcast update
-			h.DB.Preload("Freelancer").Preload("Freelancer.FreelancerProfile").
-				Preload("Client").Preload("Product").
-				First(&offer, "id = ?", offer.ID)
+		if err := h.DB.Preload("Freelancer").Preload("Freelancer.FreelancerProfile").
+			Preload("Client").Preload("Product").
+			Where("order_code = ?", orderCode).First(&offer).Error; err == nil {
 
 			h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
 				"type":  "offer_status_update",
@@ -259,15 +294,15 @@ func (h *PaymentHandler) HandleCallback(c *fiber.Ctx) error {
 
 			// Create System Message
 			sysMsg := models.Message{
+				ID:             uuid.New(),
 				ConversationID: offer.ConversationID,
-				SenderID:       offer.ClientID, // Sender is Client (payer), but type is system
+				SenderID:       offer.ClientID,
 				Type:           "system",
-				Text:           "Pemberi Kerja telah melakukan pembayaran ke Platform. Freelancer sekarang dapat mulai bekerja.",
+				Text:           "Pembayaran terverifikasi. Pembeli telah mengirimkan dana ke Escrow Platform. Freelancer dapat mulai bekerja.",
 				CreatedAt:      time.Now(),
 			}
 
 			if err := h.DB.Create(&sysMsg).Error; err == nil {
-				// Broadcast new message
 				h.Hub.SendToConversation(offer.ClientID, offer.FreelancerID, fiber.Map{
 					"type":    "new_message",
 					"message": sysMsg,

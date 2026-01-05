@@ -47,7 +47,8 @@ func main() {
 		&models.ConversationMemberRead{},
 		&models.JobOffer{},
 		&models.Transaction{},
-		&models.WalletTransaction{}); err != nil {
+		&models.WalletTransaction{},
+		&models.Review{}); err != nil {
 		log.Fatal(err)
 	}
 
@@ -216,9 +217,9 @@ func main() {
 	protected.Patch("/job-offers/:id/status", offerH.UpdateStatus)
 	protected.Put("/job-offers/:id", offerH.UpdateOffer)          // Update offer
 	protected.Post("/job-offers/:id/deliver", offerH.DeliverWork) // Deliver work
-	protected.Post("/job-offers/:id/revision", offerH.RequestRevision)
 	protected.Post("/job-offers/:id/complete", offerH.CompleteOrder)
 	protected.Post("/job-offers/:id/cancel", offerH.CancelOrder)
+	protected.Post("/job-offers/:id/review", offerH.SubmitReview)
 
 	// Payments
 	protected.Get("/payments/channels", paymentH.GetChannels)

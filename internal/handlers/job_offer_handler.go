@@ -1186,3 +1186,72 @@ func (h *JobOfferHandler) CancelOrder(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"success": true, "data": toJobOfferResponse(&offer)})
 }
+
+// SubmitReview handles review submission for a completed job offer
+func (h *JobOfferHandler) SubmitReview(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	userUUID, _ := uuid.Parse(userID.(string))
+	offerID := c.Params("id")
+	offerUUID, err := uuid.Parse(offerID)
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid offer ID"})
+	}
+
+	var req struct {
+		Rating  int    `json:"rating"`
+		Comment string `json:"comment"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid request body"})
+	}
+
+	if req.Rating < 1 || req.Rating > 5 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Rating must be between 1 and 5"})
+	}
+
+	var offer models.JobOffer
+	if err := h.DB.First(&offer, "id = ?", offerUUID).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "Offer not found"})
+	}
+
+	// 1. Must be the client who made the order
+	if offer.ClientID != userUUID {
+		return c.Status(403).JSON(fiber.Map{"success": false, "message": "Only the client who ordered can submit a review"})
+	}
+
+	// 2. Order must be completed
+	if offer.Status != models.OfferStatusCompleted {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Order must be completed to give a review"})
+	}
+
+	// 3. Prevent duplicate reviews
+	var existingReview models.Review
+	if err := h.DB.Where("job_offer_id = ?", offer.ID).First(&existingReview).Error; err == nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "You have already reviewed this order"})
+	}
+
+	// Create review
+	review := models.Review{
+		JobOfferID:   offer.ID,
+		ClientID:     offer.ClientID,
+		FreelancerID: offer.FreelancerID,
+		ProductID:    offer.ProductID,
+		Rating:       req.Rating,
+		Comment:      req.Comment,
+	}
+
+	if err := h.DB.Create(&review).Error; err != nil {
+		log.Println("Error creating review:", err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to submit review"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Review submitted successfully",
+		"data":    review,
+	})
+}

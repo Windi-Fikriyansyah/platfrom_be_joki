@@ -3,7 +3,11 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/models"
@@ -158,6 +162,8 @@ type MessageMini struct {
 	SenderID       string    `json:"sender_id"`
 	Type           string    `json:"type"`
 	Text           string    `json:"text"`
+	FileUrl        string    `json:"file_url,omitempty"`
+	FileName       string    `json:"file_name,omitempty"`
 	IsRead         bool      `json:"is_read"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -221,6 +227,8 @@ func (h *ChatHandler) GetConversations(c *fiber.Ctx) error {
 				SenderID:       last.SenderID.String(),
 				Type:           last.Type,
 				Text:           last.Text,
+				FileUrl:        last.FileUrl,
+				FileName:       last.FileName,
 				IsRead:         last.IsRead,
 				CreatedAt:      last.CreatedAt,
 			}
@@ -319,6 +327,8 @@ type MessageResponse struct {
 	SenderID       string    `json:"sender_id"`
 	Type           string    `json:"type"`
 	Text           string    `json:"text"`
+	FileUrl        string    `json:"file_url,omitempty"`
+	FileName       string    `json:"file_name,omitempty"`
 	IsRead         bool      `json:"is_read"`
 	CreatedAt      time.Time `json:"created_at"`
 }
@@ -410,6 +420,8 @@ func (h *ChatHandler) GetMessages(c *fiber.Ctx) error {
 			SenderID:       msg.SenderID.String(),
 			Type:           msg.Type,
 			Text:           msg.Text,
+			FileUrl:        msg.FileUrl,
+			FileName:       msg.FileName,
 			IsRead:         msg.IsRead,
 			CreatedAt:      msg.CreatedAt,
 		})
@@ -531,13 +543,23 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 	}
 
 	var req struct {
-		Text string `json:"text"`
+		Text     string `json:"text"`
+		Type     string `json:"type"`
+		FileUrl  string `json:"file_url"`
+		FileName string `json:"file_name"`
 	}
 
-	if err := c.BodyParser(&req); err != nil || req.Text == "" {
+	if err := c.BodyParser(&req); err != nil {
 		return c.Status(400).JSON(fiber.Map{
 			"success": false,
-			"message": "Text is required",
+			"message": "Invalid request",
+		})
+	}
+
+	if req.Text == "" && req.FileUrl == "" {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "Text or file is required",
 		})
 	}
 
@@ -561,8 +583,15 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 	msg := models.Message{
 		ConversationID: convUUID,
 		SenderID:       userUUID,
+		Type:           req.Type,
 		Text:           req.Text,
+		FileUrl:        req.FileUrl,
+		FileName:       req.FileName,
 		IsRead:         false,
+	}
+
+	if msg.Type == "" {
+		msg.Type = "text"
 	}
 
 	if err := h.DB.Create(&msg).Error; err != nil {
@@ -586,6 +615,8 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 		SenderID:       msg.SenderID.String(),
 		Type:           msg.Type,
 		Text:           msg.Text,
+		FileUrl:        msg.FileUrl,
+		FileName:       msg.FileName,
 		IsRead:         msg.IsRead,
 		CreatedAt:      msg.CreatedAt,
 	}
@@ -614,6 +645,52 @@ func (h *ChatHandler) SendMessage(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    msgResp,
+	})
+}
+
+// UploadFile handles file upload for chat
+func (h *ChatHandler) UploadFile(c *fiber.Ctx) error {
+	userID := c.Locals("userId")
+	if userID == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	file, err := c.FormFile("file")
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "No file uploaded"})
+	}
+
+	// Validate file size (e.g., 5MB)
+	if file.Size > 5*1024*1024 {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "File too large (max 5MB)"})
+	}
+
+	// Create directory if not exists
+	uploadDir := "./uploads/chat"
+	if _, err := os.Stat(uploadDir); os.IsNotExist(err) {
+		os.MkdirAll(uploadDir, 0755)
+	}
+
+	// Clean filename and add timestamp
+	ext := filepath.Ext(file.Filename)
+	base := strings.TrimSuffix(file.Filename, ext)
+	filename := fmt.Sprintf("%d_%s%s", time.Now().UnixNano(), base, ext)
+	filePath := filepath.Join(uploadDir, filename)
+
+	if err := c.SaveFile(file, filePath); err != nil {
+		log.Println("Error saving chat file:", err)
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Failed to save file"})
+	}
+
+	// Return public URL and original filename
+	fileURL := fmt.Sprintf("/uploads/chat/%s", filename)
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"url":       fileURL,
+			"file_name": file.Filename,
+		},
 	})
 }
 

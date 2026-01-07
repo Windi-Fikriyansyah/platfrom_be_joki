@@ -1,6 +1,8 @@
 package middleware
 
 import (
+	"strings"
+
 	"github.com/Windi-Fikriyansyah/platfrom_be_joki/internal/utils"
 	"github.com/gofiber/fiber/v2"
 	"github.com/golang-jwt/jwt/v5"
@@ -9,6 +11,15 @@ import (
 func JWTFromCookie(secret string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		tokenStr := c.Cookies("jm_token")
+
+		// fall back to Authorization header
+		if tokenStr == "" {
+			authHeader := c.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			}
+		}
+
 		if tokenStr == "" {
 			return fiber.ErrUnauthorized
 		}

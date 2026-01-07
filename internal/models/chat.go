@@ -42,8 +42,10 @@ type Message struct {
 	ID             uuid.UUID  `gorm:"type:uuid;primaryKey;default:gen_random_uuid()" json:"id"`
 	ConversationID uuid.UUID  `gorm:"type:uuid;index" json:"conversation_id"`
 	SenderID       uuid.UUID  `gorm:"type:uuid;index" json:"sender_id"`
-	Type           string     `gorm:"default:'text'" json:"type"` // text, offer, system
+	Type           string     `gorm:"default:'text'" json:"type"` // text, offer, system, file
 	Text           string     `json:"text"`
+	FileUrl        string     `json:"file_url,omitempty"`
+	FileName       string     `json:"file_name,omitempty"`
 	IsRead         bool       `gorm:"default:false" json:"is_read"`
 	ReadAt         *time.Time `json:"read_at"`
 	CreatedAt      time.Time  `json:"created_at"`

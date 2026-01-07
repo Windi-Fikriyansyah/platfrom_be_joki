@@ -227,6 +227,7 @@ func main() {
 	chat.Post("/conversations/:id/messages", chatH.SendMessage)
 	chat.Patch("/conversations/:id/read", chatH.MarkAsRead)
 	chat.Get("/unread-count", chatH.GetUnreadTotal)
+	chat.Post("/upload", chatH.UploadFile)
 
 	// Job Offers
 	chat.Post("/conversations/:id/offers", offerH.CreateOffer)

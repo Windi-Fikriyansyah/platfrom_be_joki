@@ -103,8 +103,10 @@ func main() {
 		DB:              gdb,
 		JWTSecret:       cfg.JWTSecret,
 		Expires:         cfg.JWTExpiresMin,
-		GoogleRedirect:  os.Getenv("GOOGLE_REDIRECT_URL"),
-		FrontendBaseURL: os.Getenv("FRONTEND_BASE_URL"),
+		GoogleClientID:  cfg.GoogleClientID,
+		GoogleSecret:    cfg.GoogleSecret,
+		GoogleRedirect:  cfg.GoogleRedirect,
+		FrontendBaseURL: cfg.FrontendBaseURL,
 	}
 
 	dashboardH := handlers.NewFreelancerDashboardHandler(gdb)
@@ -156,6 +158,7 @@ func main() {
 	)
 
 	// contoh: siapa saya
+	protected.Put("/me", authH.UpdateMe)
 	protected.Get("/me", func(c *fiber.Ctx) error {
 		uid := c.Locals("userId")
 
@@ -182,6 +185,7 @@ func main() {
 				"name":         user.Name,
 				"email":        user.Email,
 				"role":         user.Role,
+				"phone":        user.Phone,
 				"unread_count": unreadCount,
 			},
 		})

@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -20,12 +22,12 @@ import (
 
 type GoogleOAuthHandler struct {
 	DB              *gorm.DB
-	JWTSecret        string
-	Expires          int
-	GoogleClientID   string
-	GoogleSecret     string
-	GoogleRedirect   string
-	FrontendBaseURL  string
+	JWTSecret       string
+	Expires         int
+	GoogleClientID  string
+	GoogleSecret    string
+	GoogleRedirect  string
+	FrontendBaseURL string
 }
 
 func (h *GoogleOAuthHandler) oauthCfg() *oauth2.Config {
@@ -145,9 +147,17 @@ func (h *GoogleOAuthHandler) GoogleCallback(c *fiber.Ctx) error {
 			Password: hashed,
 			Role:     models.RoleClient,
 			IsActive: true,
+			// workaround for unique index on phone:
+			// use a dummy value if it's empty, or handled by DB as null (if it was nullable)
+			// but here it's likely failing because "" is already taken by another user.
+			Phone: fmt.Sprintf("google_%s", state[:10]),
 		}
 		if err := h.DB.Create(&u).Error; err != nil {
-			return c.Status(fiber.StatusBadRequest).SendString("Failed to create user")
+			log.Println("Error creating user via Google:", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"success": false,
+				"message": "Gagal membuat akun: " + err.Error(),
+			})
 		}
 	} else {
 		// update nama kalau kosong / beda (opsional)
@@ -186,7 +196,6 @@ func (h *GoogleOAuthHandler) GoogleCallback(c *fiber.Ctx) error {
 	// redirect balik ke FE (cookie sudah ke-set)
 	// opsional: tambahkan toast
 	redirectURL := h.FrontendBaseURL + next
-	
 
 	// kalau kamu butuh memastikan path next valid:
 	// (minimal check: harus diawali '/')

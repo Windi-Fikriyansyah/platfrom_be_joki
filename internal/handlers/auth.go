@@ -268,3 +268,50 @@ func (h *AuthHandler) Logout(c *fiber.Ctx) error {
 		"message": "Logout berhasil",
 	})
 }
+
+type UpdateMeReq struct {
+	Name  string `json:"name"`
+	Phone string `json:"phone"`
+}
+
+func (h *AuthHandler) UpdateMe(c *fiber.Ctx) error {
+	uid := c.Locals("userId")
+	if uid == nil {
+		return c.Status(401).JSON(fiber.Map{"success": false, "message": "Unauthorized"})
+	}
+
+	var req UpdateMeReq
+	if err := c.BodyParser(&req); err != nil {
+		return c.Status(400).JSON(fiber.Map{"success": false, "message": "Invalid body"})
+	}
+
+	var user models.User
+	if err := h.DB.First(&user, "id = ?", uid).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{"success": false, "message": "User not found"})
+	}
+
+	if req.Name != "" {
+		user.Name = req.Name
+	}
+	if req.Phone != "" {
+		// Cek kalau no hp sudah dipakai user lain
+		var other models.User
+		if err := h.DB.Where("phone = ? AND id != ?", req.Phone, user.ID).First(&other).Error; err == nil {
+			return c.Status(400).JSON(fiber.Map{
+				"success": false,
+				"message": "Nomor telepon sudah digunakan",
+			})
+		}
+		user.Phone = req.Phone
+	}
+
+	if err := h.DB.Save(&user).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{"success": false, "message": "Gagal update profil"})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"message": "Profil berhasil diperbarui",
+		"data":    user,
+	})
+}

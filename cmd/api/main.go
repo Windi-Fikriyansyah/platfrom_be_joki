@@ -91,15 +91,23 @@ func main() {
 	// Public Callbacks (Root level to avoid middleware issues)
 	app.Post("/tripay/callback", paymentH.HandleCallback)
 
+	fOnboard := handlers.NewFreelancerOnboardingHandler(
+		gdb,
+		"./uploads",
+		os.Getenv("APP_BASE_URL"), // opsional, boleh kosong
+		cfg.JWTSecret,
+		cfg.JWTExpiresMin,
+	)
+
 	googleH := &handlers.GoogleOAuthHandler{
 		DB:              gdb,
 		JWTSecret:       cfg.JWTSecret,
 		Expires:         cfg.JWTExpiresMin,
-		GoogleClientID:  os.Getenv("GOOGLE_CLIENT_ID"),
-		GoogleSecret:    os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GoogleRedirect:  os.Getenv("GOOGLE_REDIRECT_URL"),
 		FrontendBaseURL: os.Getenv("FRONTEND_BASE_URL"),
 	}
+
+	dashboardH := handlers.NewFreelancerDashboardHandler(gdb)
 
 	api := app.Group("/api")
 
@@ -112,6 +120,8 @@ func main() {
 	api.Get("/categories", categoryH.GetCategories)
 	api.Get("/products", productH.ListPublic)
 	api.Get("/products/:id", productH.GetDetail)
+	api.Get("/products/:id/reviews", productH.GetReviews)
+	api.Get("/freelancer/profile/:id", fOnboard.GetPublicProfile)
 
 	// protected (JWT)
 	protected := api.Group("/",
@@ -198,6 +208,14 @@ func main() {
 		productH.ListMine,
 	)
 
+	// Freelancer Dashboard & Features
+	protected.Get("/freelancer/dashboard/stats", middleware.RequireRoles("freelancer"), dashboardH.GetDashboardStats)
+	protected.Get("/freelancer/orders", middleware.RequireRoles("freelancer"), dashboardH.GetOrders)
+	protected.Get("/freelancer/earnings", middleware.RequireRoles("freelancer"), dashboardH.GetEarnings)
+	protected.Get("/freelancer/profile", middleware.RequireRoles("freelancer"), dashboardH.GetProfile)
+	protected.Put("/freelancer/profile", middleware.RequireRoles("freelancer"), dashboardH.UpdateSettings)
+	protected.Put("/freelancer/profile/photo", middleware.RequireRoles("freelancer"), dashboardH.UpdatePhoto)
+
 	chat := protected.Group("/chat")
 
 	// Job Offer Handler (using offerH from above)
@@ -254,14 +272,6 @@ func main() {
 	protected.Get("/admin/users",
 		middleware.RequireRoles("admin"),
 		func(c *fiber.Ctx) error { return c.JSON(fiber.Map{"msg": "admin users"}) },
-	)
-
-	fOnboard := handlers.NewFreelancerOnboardingHandler(
-		gdb,
-		"./uploads",
-		os.Getenv("APP_BASE_URL"), // opsional, boleh kosong
-		cfg.JWTSecret,
-		cfg.JWTExpiresMin,
 	)
 
 	onb := protected.Group("/freelancer/onboarding", middleware.RequireRoles("client"))

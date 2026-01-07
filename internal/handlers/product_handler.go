@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -469,13 +470,17 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 		SystemName     string
 		FreelancerType models.FreelancerType
 		PhotoURL       string
+		AvgRating      float64
+		ReviewCount    int64
+		Sold           int64
 	}
 
-	// ===== QUERY PARAM =====
+	// ===== FILTER =====
 	qSearch := c.Query("q")
 	category := c.Query("cat")
 	minPrice := c.QueryInt("min", 0)
 	maxPrice := c.QueryInt("max", 0)
+	sortParam := c.Query("sort") // latest | price_low | price_high
 
 	q := h.DB.
 		Table("products").
@@ -488,15 +493,16 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 			products.user_id,
 			fp.system_name,
 			fp.freelancer_type,
-			fp.photo_url
+			fp.photo_url,
+			(SELECT COALESCE(AVG(rating), 0) FROM reviews r WHERE r.product_id = products.id) as avg_rating,
+			(SELECT COUNT(*) FROM reviews r WHERE r.product_id = products.id) as review_count,
+			(SELECT COUNT(*) FROM job_offers jo WHERE jo.product_id = products.id AND jo.status = 'completed') as sold
 		`).
 		Joins(`
 			LEFT JOIN freelancer_profiles fp 
 			ON fp.user_id = products.user_id
 		`).
 		Where("products.status = ?", "published")
-
-	// ===== FILTER =====
 
 	if qSearch != "" {
 		q = q.Where("LOWER(products.title) LIKE ?", "%"+strings.ToLower(qSearch)+"%")
@@ -511,9 +517,63 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 		q = q.Where("products.base_price <= ?", maxPrice)
 	}
 
+	// ===== SORTING =====
+	switch sortParam {
+	case "price_low":
+		q = q.Order("products.base_price ASC")
+	case "price_high":
+		q = q.Order("products.base_price DESC")
+	default:
+		// Default latest
+		q = q.Order("products.created_at DESC")
+	}
+
+	// ===== PAGINATION =====
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 20)
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	var totalItems int64
+	// Count total items using a separate session to avoid polluting the main query logic
+	// We need to count based on the filters, but 'Count' in GORM might modify the query.
+	// So we create a countQuery that excludes Limit/Offset/Order.
+	// However, GORM's Count method should handle this, but to be 100% safe with complex Selects:
+	if err := h.DB.Table("products").
+		Joins("LEFT JOIN freelancer_profiles fp ON fp.user_id = products.user_id").
+		Where("products.status = ?", "published").
+		Where(func(db *gorm.DB) *gorm.DB {
+			if qSearch != "" {
+				db = db.Where("LOWER(products.title) LIKE ?", "%"+strings.ToLower(qSearch)+"%")
+			}
+			if category != "" {
+				db = db.Where("products.category = ?", category)
+			}
+			if minPrice > 0 {
+				db = db.Where("products.base_price >= ?", minPrice)
+			}
+			if maxPrice > 0 {
+				db = db.Where("products.base_price <= ?", maxPrice)
+			}
+			return db
+		}(h.DB)).
+		Count(&totalItems).Error; err != nil {
+
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal menghitung layanan",
+		})
+	}
+
 	var rows []Result
 	if err := q.
-		Order("products.created_at DESC").
+		Limit(limit).
+		Offset(offset).
 		Scan(&rows).Error; err != nil {
 
 		return c.Status(500).JSON(fiber.Map{
@@ -547,13 +607,14 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 		}
 
 		out = append(out, fiber.Map{
-			"id":       encID,
-			"title":    r.Title,
-			"category": r.Category,
-			"price":    r.BasePrice,
-			"cover":    r.CoverURL,
-			"rating":   0,
-			"sold":     0,
+			"id":           encID,
+			"title":        r.Title,
+			"category":     r.Category,
+			"price":        r.BasePrice,
+			"cover":        r.CoverURL,
+			"rating":       r.AvgRating,
+			"sold":         r.Sold,
+			"review_count": r.ReviewCount,
 			"seller": fiber.Map{
 				"name":      name,
 				"title":     "Freelancer",
@@ -566,6 +627,12 @@ func (h *ProductHandler) ListPublic(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{
 		"success": true,
 		"data":    out,
+		"meta": fiber.Map{
+			"page":        page,
+			"limit":       limit,
+			"total_items": totalItems,
+			"total_pages": int(math.Ceil(float64(totalItems) / float64(limit))),
+		},
 	})
 }
 
@@ -653,6 +720,21 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 		freelancerLevel = "Part Time"
 	}
 
+	// Calculate rating stats
+	var ratingStats struct {
+		AvgRating   float64
+		ReviewCount int64
+	}
+	h.DB.Model(&models.Review{}).
+		Where("product_id = ?", product.ID).
+		Select("COALESCE(AVG(rating), 0) as avg_rating, COUNT(*) as review_count").
+		Scan(&ratingStats)
+
+	var soldCount int64
+	h.DB.Model(&models.JobOffer{}).
+		Where("product_id = ? AND status = ?", product.ID, "completed").
+		Count(&soldCount)
+
 	log.Printf("[GetOnePublic] Success! Returning product data")
 
 	return c.JSON(fiber.Map{
@@ -668,8 +750,9 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 			"packages":               packages,
 			"portfolio":              portfolio,
 			"status":                 product.Status,
-			"rating":                 5.0,
-			"sold":                   0,
+			"rating":                 ratingStats.AvgRating,
+			"review_count":           ratingStats.ReviewCount,
+			"sold":                   soldCount,
 			"freelancer": fiber.Map{
 				"id":        product.UserID,
 				"name":      freelancerName,
@@ -680,5 +763,53 @@ func (h *ProductHandler) GetDetail(c *fiber.Ctx) error {
 			"created_at": product.CreatedAt,
 			"updated_at": product.UpdatedAt,
 		},
+	})
+}
+
+func (h *ProductHandler) GetReviews(c *fiber.Ctx) error {
+	encID := c.Params("id")
+	rawID, err := utils.DecryptID(encID, os.Getenv("ID_ENCRYPT_KEY"))
+	if err != nil {
+		return c.Status(400).JSON(fiber.Map{
+			"success": false,
+			"message": "Invalid product ID",
+		})
+	}
+
+	var reviews []models.Review
+	if err := h.DB.
+		Where("product_id = ?", rawID).
+		Preload("Client"). // Load reviewer info
+		Order("created_at DESC").
+		Find(&reviews).Error; err != nil {
+		return c.Status(500).JSON(fiber.Map{
+			"success": false,
+			"message": "Gagal mengambil ulasan",
+		})
+	}
+
+	out := make([]fiber.Map, 0, len(reviews))
+	for _, r := range reviews {
+		reviewerName := "Pengguna"
+		reviewerPhoto := ""
+		if r.Client != nil {
+			reviewerName = r.Client.Name
+		}
+
+		out = append(out, fiber.Map{
+			"id":         r.ID,
+			"rating":     r.Rating,
+			"comment":    r.Comment,
+			"created_at": r.CreatedAt,
+			"reviewer": fiber.Map{
+				"name":      reviewerName,
+				"photo_url": reviewerPhoto,
+			},
+		})
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data":    out,
 	})
 }

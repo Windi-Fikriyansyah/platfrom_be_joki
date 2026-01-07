@@ -22,8 +22,8 @@ type FreelancerOnboardingHandler struct {
 	DB            *gorm.DB
 	UploadDir     string
 	PublicBaseURL string
-	JWTSecret  string
-	ExpiresMin int
+	JWTSecret     string
+	ExpiresMin    int
 }
 
 func isUniqueViolation(err error) bool {
@@ -31,7 +31,6 @@ func isUniqueViolation(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate key value") ||
 		strings.Contains(strings.ToLower(err.Error()), "unique constraint")
 }
-
 
 func NewFreelancerOnboardingHandler(
 	db *gorm.DB,
@@ -80,7 +79,6 @@ func fail500(c *fiber.Ctx, message string) error {
 		"message": message,
 	})
 }
-
 
 func getAuth(c *fiber.Ctx) (uuid.UUID, error) {
 	rawID, ok := c.Locals("userId").(string)
@@ -196,19 +194,18 @@ func (h *FreelancerOnboardingHandler) UploadPhoto(c *fiber.Ctx) error {
 	}
 
 	file, err := c.FormFile("photo")
-if err != nil {
-	return fail200(c, "photo is required (multipart field: photo)")
-}
+	if err != nil {
+		return fail200(c, "photo is required (multipart field: photo)")
+	}
 
-ext := strings.ToLower(filepath.Ext(file.Filename))
-if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
-	return fail200(c, "photo must be jpg/jpeg/png")
-}
+	ext := strings.ToLower(filepath.Ext(file.Filename))
+	if ext != ".jpg" && ext != ".jpeg" && ext != ".png" {
+		return fail200(c, "photo must be jpg/jpeg/png")
+	}
 
-if file.Size > 2*1024*1024 {
-	return fail200(c, "photo max size is 2MB")
-}
-
+	if file.Size > 2*1024*1024 {
+		return fail200(c, "photo max size is 2MB")
+	}
 
 	dir := filepath.Join(h.UploadDir, "freelancers", userID.String())
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -246,12 +243,10 @@ if file.Size > 2*1024*1024 {
 	p.OnboardingStep = bumpStep(p.OnboardingStep, 1)
 	p.UpdatedAt = time.Now()
 
-	
 	if err := tx.Save(p).Error; err != nil {
-	tx.Rollback()
-	return fail500(c, "failed to update profile")
-}
-
+		tx.Rollback()
+		return fail500(c, "failed to update profile")
+	}
 
 	tx.Commit()
 
@@ -283,11 +278,11 @@ func (h *FreelancerOnboardingHandler) UpdateProfile(c *fiber.Ctx) error {
 	ftype := models.FreelancerType(strings.TrimSpace(req.FreelancerType))
 
 	if systemName == "" {
-	return fail200(c, "system_name is required")
-}
-if !validateFreelancerType(ftype) {
-	return fail200(c, "freelancer_type must be full_time or part_time")
-}
+		return fail200(c, "system_name is required")
+	}
+	if !validateFreelancerType(ftype) {
+		return fail200(c, "freelancer_type must be full_time or part_time")
+	}
 
 	tx := h.DB.Begin()
 	defer func() {
@@ -303,24 +298,23 @@ if !validateFreelancerType(ftype) {
 	}
 
 	if p.PhotoURL == "" {
-	tx.Rollback()
-	return fail200(c, "complete step 1 (upload photo) first")
-}
-if p.OnboardingStatus != models.StatusDraft {
-	tx.Rollback()
-	return fail200(c, "onboarding already submitted/reviewed")
-}
+		tx.Rollback()
+		return fail200(c, "complete step 1 (upload photo) first")
+	}
+	if p.OnboardingStatus != models.StatusDraft {
+		tx.Rollback()
+		return fail200(c, "onboarding already submitted/reviewed")
+	}
 
 	p.SystemName = systemName
 	p.FreelancerType = ftype
 	p.OnboardingStep = bumpStep(p.OnboardingStep, 2)
 	p.UpdatedAt = time.Now()
 
-	
 	if err := tx.Save(p).Error; err != nil {
-	tx.Rollback()
-	return fail500(c, "failed to update")
-}
+		tx.Rollback()
+		return fail500(c, "failed to update")
+	}
 
 	tx.Commit()
 
@@ -375,9 +369,9 @@ func (h *FreelancerOnboardingHandler) UpdateAbout(c *fiber.Ctx) error {
 	p.UpdatedAt = time.Now()
 
 	if err := tx.Save(p).Error; err != nil {
-	tx.Rollback()
-	return fail500(c, "failed to update")
-}
+		tx.Rollback()
+		return fail500(c, "failed to update")
+	}
 
 	tx.Commit()
 
@@ -396,6 +390,7 @@ type updateIdentityReq struct {
 	Kecamatan  string `json:"kecamatan"`
 	City       string `json:"city"`
 }
+
 var postalRe = regexp.MustCompile(`^\d{5}$`)
 
 func (h *FreelancerOnboardingHandler) UpdateIdentity(c *fiber.Ctx) error {
@@ -498,7 +493,6 @@ func (h *FreelancerOnboardingHandler) UpdateIdentity(c *fiber.Ctx) error {
 	return c.Status(fiber.StatusOK).JSON(fiber.Map{"success": true, "data": p})
 }
 
-
 // Step 5: contact confirm
 type updateContactReq struct {
 	ContactPhone   string `json:"contact_phone"`
@@ -566,7 +560,6 @@ func (h *FreelancerOnboardingHandler) UpdateContact(c *fiber.Ctx) error {
 
 	return c.JSON(fiber.Map{"success": true, "data": p})
 }
-
 
 // Final submit
 func (h *FreelancerOnboardingHandler) Submit(c *fiber.Ctx) error {
@@ -713,3 +706,133 @@ func (h *FreelancerOnboardingHandler) Submit(c *fiber.Ctx) error {
 	})
 }
 
+// Public Profile Handler
+func (h *FreelancerOnboardingHandler) GetPublicProfile(c *fiber.Ctx) error {
+	idParam := c.Params("id")
+	targetUserID, err := uuid.Parse(idParam)
+	if err != nil {
+		return fail200(c, "invalid user id")
+	}
+
+	// 1. Get Profile
+	var profile models.FreelancerProfile
+	if err := h.DB.Where("user_id = ?", targetUserID).First(&profile).Error; err != nil {
+		return c.Status(404).JSON(fiber.Map{
+			"success": false,
+			"message": "Profil tidak ditemukan",
+		})
+	}
+
+	// 2. Get User Info (Joined At)
+	var user models.User
+	h.DB.Select("created_at").First(&user, "id = ?", targetUserID)
+
+	// 3. Get Products (Published Only) with aggregated stats
+	type ProductResult struct {
+		ID          uint
+		Title       string
+		Category    string
+		BasePrice   int64
+		CoverURL    string
+		AvgRating   float64
+		ReviewCount int64
+	}
+
+	var products []ProductResult
+	h.DB.Table("products").
+		Select(`
+			products.id,
+			products.title,
+			products.category,
+			products.base_price,
+			products.cover_url,
+			(SELECT COALESCE(AVG(rating), 0) FROM reviews r WHERE r.product_id = products.id) as avg_rating,
+			(SELECT COUNT(*) FROM reviews r WHERE r.product_id = products.id) as review_count
+		`).
+		Where("products.user_id = ? AND products.status = ?", targetUserID, "published").
+		Order("products.created_at DESC").
+		Scan(&products)
+
+	// Format products output
+	outProducts := make([]fiber.Map, 0, len(products))
+	for _, p := range products {
+		encID, _ := utils.EncryptID(p.ID, os.Getenv("ID_ENCRYPT_KEY"))
+		outProducts = append(outProducts, fiber.Map{
+			"id":           encID,
+			"title":        p.Title,
+			"category":     p.Category,
+			"price":        p.BasePrice,
+			"cover":        p.CoverURL,
+			"rating":       p.AvgRating,
+			"review_count": p.ReviewCount,
+		})
+	}
+
+	// 4. Get All Reviews for this freelancer (via products)
+	// We can join reviews -> products -> user_id
+	var reviews []models.Review
+	h.DB.Table("reviews").
+		Joins("JOIN products ON products.id = reviews.product_id").
+		Preload("Client"). // Load reviewer info
+		Where("products.user_id = ?", targetUserID).
+		Order("reviews.created_at DESC").
+		Limit(20). // Limit recent reviews
+		Find(&reviews)
+
+	// Calculate total stats
+	var totalStats struct {
+		AvgRating   float64
+		ReviewCount int64
+	}
+	h.DB.Table("reviews").
+		Joins("JOIN products ON products.id = reviews.product_id").
+		Where("products.user_id = ?", targetUserID).
+		Select("COALESCE(AVG(reviews.rating), 0) as avg_rating, COUNT(reviews.id) as review_count").
+		Scan(&totalStats)
+
+	outReviews := make([]fiber.Map, 0, len(reviews))
+	for _, r := range reviews {
+		reviewerName := "Pengguna"
+		if r.Client != nil {
+			reviewerName = r.Client.Name
+		}
+		outReviews = append(outReviews, fiber.Map{
+			"id":         r.ID,
+			"rating":     r.Rating,
+			"comment":    r.Comment,
+			"created_at": r.CreatedAt,
+			"reviewer": fiber.Map{
+				"name": reviewerName,
+			},
+		})
+	}
+
+	// Determine freelancer level display
+	level := "Freelancer"
+	switch profile.FreelancerType {
+	case models.FreelancerFullTime:
+		level = "Full Time"
+	case models.FreelancerPartTime:
+		level = "Part Time"
+	}
+
+	return c.JSON(fiber.Map{
+		"success": true,
+		"data": fiber.Map{
+			"profile": fiber.Map{
+				"id":           profile.UserID,
+				"name":         profile.SystemName,
+				"title":        "Freelancer", // Or specific title if available
+				"level":        level,
+				"photo_url":    profile.PhotoURL,
+				"about":        profile.About,
+				"location":     fmt.Sprintf("%s, %s", profile.City, profile.Kecamatan), // Simple location
+				"joined_at":    user.CreatedAt,
+				"rating":       totalStats.AvgRating,
+				"review_count": totalStats.ReviewCount,
+			},
+			"products": outProducts,
+			"reviews":  outReviews,
+		},
+	})
+}
